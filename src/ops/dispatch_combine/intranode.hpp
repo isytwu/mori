@@ -88,13 +88,13 @@ __global__ void EpDispatchIntraNodeKernel(EpDispatchCombineArgs<T> args) {
 
       if (laneId == 0) {
         // decide token id in dest pe
-        destTokId = atomicAdd(args.dispTokOffsetMemObj->template GetAs<index_t*>(destPe), 1);
-        atomicAdd(args.destPeTokenCounter + destPe, 1);
-        args.dispDestTokIdMap[i] = destPe * maxNumOutTokenPerRank + destTokId;
+        destTokId = atomicAdd(args.dispTokOffsetMemObj->template GetAs<index_t*>(destPe), 1);//在dest那边取号，所有pe都用这个取号？dispTokOffsetMemObj应该是全pe可见的buffer，而不是一对一的buffer
+        atomicAdd(args.destPeTokenCounter + destPe, 1);//本地计数：发给destP的token总数
+        args.dispDestTokIdMap[i] = destPe * maxNumOutTokenPerRank + destTokId;//给combine：topk_idx的序号 与 发到dest的序号信息的映射,这个值不是实际的存储位置
 
         // TODO: use a switch to control the writing of this buffer, should only turn on for testing
         args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(destPe)[destTokId] =
-            myPe * config.maxNumInpTokenPerRank + srcTokId;
+            myPe * config.maxNumInpTokenPerRank + srcTokId;//给用户：因为收到的token是pe随意排序的：pe0t1，pe3t0，pe2t2...提供src token信息；destTokId和发送方token的全局ID
       }
       destTokId = __shfl(destTokId, 0);
 
@@ -120,7 +120,7 @@ __global__ void EpDispatchIntraNodeKernel(EpDispatchCombineArgs<T> args) {
       index_t srcTokOffset = srcTokId * config.hiddenDim;
       index_t destTokOffset = destTokId * config.hiddenDim;
       core::WarpCopy(args.shmemOutTokMemObj->template GetAs<T*>(destPe) + destTokOffset,
-                     args.inpTokenBuf + srcTokOffset, config.hiddenDim);
+                     args.inpTokenBuf + srcTokOffset, config.hiddenDim);//来自不同PE的token根据取号顺序写入
     }
   }
   if (laneId == 0) atomicAdd(args.dispatchGridBarrier, 1);
@@ -240,7 +240,7 @@ __global__ void EpCombineIntraNodeKernel(EpDispatchCombineArgs<T> args) {
     }
     core::WarpAccum<T, 8>(
         args.shmemOutTokMemObj->template GetAs<T*>() + tokenId * config.hiddenDim + hiddenDimOffset,
-        srcPtrs, nullptr, config.numExpertPerToken, hiddenDimSize);
+        srcPtrs, nullptr, config.numExpertPerToken, hiddenDimSize);//srcPtrs都在别的卡上，这里是拉数据，到本地做reduce
 
     if (args.weightsBuf && inTokenPartId == warpsPerToken - 1) {
       core::WarpAccum<float, 4>(

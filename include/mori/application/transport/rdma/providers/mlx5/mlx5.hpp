@@ -54,13 +54,13 @@ class Mlx5CqContainer {
 };
 
 struct WorkQueueAttrs {
-  uint32_t wqeNum{0};
-  uint32_t wqeSize{0};
-  uint64_t wqSize{0};
-  uint32_t head{0};
-  uint32_t postIdx{0};
-  uint32_t wqeShift{0};
-  uint32_t offset{0};
+  uint32_t wqeNum{0};   // 工作队列元素数量
+  uint32_t wqeSize{0};  // 单个工作队列元素大小
+  uint64_t wqSize{0};  // 整个工作队列占用的内存字节数
+  uint32_t head{0};    // 队列头部索引：发送队列：指向下一个要被硬件处理的 WQE；接收队列：指向下一个可用的接收缓冲区
+  uint32_t postIdx{0};  // 提交索引：应用程序已经提交到队列的 WQE 数量
+  uint32_t wqeShift{0};  // wqeShift = log2(wqeSize)，方便位运算
+  uint32_t offset{0};    // 队列在整个内存区域中的字节偏移量
 };
 
 class Mlx5QpContainer {

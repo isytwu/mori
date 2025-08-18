@@ -60,7 +60,7 @@ inline __device__ void PostRecv<ProviderType::MLX5>(void* queueBuffAddr, uint32_
 /*                                        Read / Write APIs                                       */
 /* ---------------------------------------------------------------------------------------------- */
 static constexpr int SendWqeSize =
-    sizeof(mlx5_wqe_ctrl_seg) + sizeof(mlx5_wqe_raddr_seg) + sizeof(mlx5_wqe_data_seg);
+    sizeof(mlx5_wqe_ctrl_seg) + sizeof(mlx5_wqe_raddr_seg) + sizeof(mlx5_wqe_data_seg);//分别为PostReadWrite填写的三个字段
 static constexpr int SendWqeNumOctoWords = CeilDiv(SendWqeSize, 16);
 static constexpr int SendWqeNumWqeBb = CeilDiv(SendWqeNumOctoWords * 16, int(MLX5_SEND_WQE_BB));
 
@@ -75,9 +75,9 @@ inline __device__ uint64_t PostReadWrite(void* queueBuffAddr, uint32_t wqeNum, u
   uintptr_t wqeAddr = reinterpret_cast<uintptr_t>(queueBuffAddr) + (wqeIdx << MLX5_SEND_WQE_SHIFT);
 
   mlx5_wqe_ctrl_seg* wqeCtrlSeg = reinterpret_cast<mlx5_wqe_ctrl_seg*>(wqeAddr);
-  wqeCtrlSeg->opmod_idx_opcode = HTOBE32(((curPostIdx & 0xffff) << 8) | opcode);
-  wqeCtrlSeg->qpn_ds = HTOBE32((qpn << 8) | SendWqeNumOctoWords);
-  wqeCtrlSeg->fm_ce_se = MLX5_WQE_CTRL_CQ_UPDATE;
+  wqeCtrlSeg->opmod_idx_opcode = HTOBE32(((curPostIdx & 0xffff) << 8) | opcode);//[31:16]操作修饰符, [15:8]WQE索引, [7:0]操作码
+  wqeCtrlSeg->qpn_ds = HTOBE32((qpn << 8) | SendWqeNumOctoWords);//[31:8]Queue Pair号, [7:0]数据段数量（以16字节为单位）
+  wqeCtrlSeg->fm_ce_se = MLX5_WQE_CTRL_CQ_UPDATE;//控制标志，MLX5_WQE_CTRL_CQ_UPDATE 表示完成时生成 CQE
 
   mlx5_wqe_raddr_seg* wqeRaddrSeg =
       reinterpret_cast<mlx5_wqe_raddr_seg*>(wqeAddr + sizeof(mlx5_wqe_ctrl_seg));
@@ -90,7 +90,7 @@ inline __device__ uint64_t PostReadWrite(void* queueBuffAddr, uint32_t wqeNum, u
   wqeDataSeg->addr = HTOBE64(laddr);
   wqeDataSeg->lkey = HTOBE32(lkey);
 
-  return reinterpret_cast<uint64_t*>(wqeCtrlSeg)[0];
+  return reinterpret_cast<uint64_t*>(wqeCtrlSeg)[0];//返回控制段的前 8 字节作为 doorbell 值
 }
 
 template <>
@@ -295,7 +295,7 @@ inline __device__ uint64_t mlx5PrepareAtomicWqe(void* queue_buff_addr, uint32_t 
       reinterpret_cast<char*>(queue_buff_addr) + ((wqeIdx + 1) << MLX5_SEND_WQE_SHIFT);
 
   int atomicWqeSize =
-      sizeof(mlx5_wqe_ctrl_seg) + sizeof(mlx5_wqe_raddr_seg) + 2 * sizeof(mlx5_wqe_atomic_seg);
+      sizeof(mlx5_wqe_ctrl_seg) + sizeof(mlx5_wqe_raddr_seg) + 2 * sizeof(mlx5_wqe_atomic_seg);//2个？
 
   struct mlx5_wqe_ctrl_seg* wqeCtrlSeg = reinterpret_cast<mlx5_wqe_ctrl_seg*>(wqeAddr);
   struct mlx5_wqe_raddr_seg* wqeRaddrSeg = reinterpret_cast<mlx5_wqe_raddr_seg*>(
@@ -570,7 +570,7 @@ DEFINE_POST_ATOMIC_SPEC(int64_t)
 template <>
 inline __device__ void UpdateSendDbrRecord<ProviderType::MLX5>(void* dbrRecAddr, uint32_t wqeIdx) {
   core::AtomicStoreSeqCstSystem(reinterpret_cast<uint32_t*>(dbrRecAddr) + MLX5_SND_DBR,
-                                HTOBE32(wqeIdx & 0xffff));
+                                HTOBE32(wqeIdx & 0xffff));//取16位，Door Bell Record 告诉硬件："处理到该索引为止的所有 WQE"
 }
 
 template <>
@@ -581,7 +581,7 @@ inline __device__ void UpdateRecvDbrRecord<ProviderType::MLX5>(void* dbrRecAddr,
 
 template <>
 inline __device__ void RingDoorbell<ProviderType::MLX5>(void* dbrAddr, uint64_t dbrVal) {
-  core::AtomicStoreSeqCstSystem(reinterpret_cast<uint64_t*>(dbrAddr), dbrVal);
+  core::AtomicStoreSeqCstSystem(reinterpret_cast<uint64_t*>(dbrAddr), dbrVal);//真正触发硬件开始处理 WQE 的操作
 }
 
 template <>
@@ -620,8 +620,8 @@ inline __device__ int PollCqOnce<ProviderType::MLX5>(void* cqeAddr, uint32_t cqe
   auto* lastBytePtr = reinterpret_cast<uint8_t*>(cqeQwords + 7) + 7;
   uint8_t opOwn = *lastBytePtr;
 
-  uint8_t opcode = opOwn >> 4;
-  uint8_t owner = opOwn & MLX5_CQE_OWNER_MASK;
+  uint8_t opcode = opOwn >> 4;                  // 高 4 位：操作码
+  uint8_t owner = opOwn & MLX5_CQE_OWNER_MASK;  // 低 1 位：owner bit
 
   bool is_empty = true;
   for (int i = 0; i < (sizeof(mlx5_cqe64) / sizeof(uint64_t)); i++) {
@@ -629,7 +629,7 @@ inline __device__ int PollCqOnce<ProviderType::MLX5>(void* cqeAddr, uint32_t cqe
       is_empty = false;
       break;
     }
-  }
+  }//空字节检查，避免硬件没有完全写入CQE
 
   // TODO: check if cqeNum should be power of 2?
   //   int cq_owner_flip = !!(consIdx & (cqeNum + 1));
@@ -638,7 +638,7 @@ inline __device__ int PollCqOnce<ProviderType::MLX5>(void* cqeAddr, uint32_t cqe
     return -1;
   }
 
-  *lastBytePtr = (MLX5_CQE_INVALID << 4) | (cq_owner_flip & 1);
+  *lastBytePtr = (MLX5_CQE_INVALID << 4) | (cq_owner_flip & 1);  // 标记 CQE 为已处理
   return opcode;
 }
 
@@ -682,7 +682,7 @@ inline __device__ int PollCq<ProviderType::MLX5>(void* cqAddr, uint32_t cqeNum, 
     printf("(%s:%d) CQE error: %s\n", __FILE__, __LINE__, IbvWcStatusString(error));
     return opcode;
   }
-  *wqeCounter = BE16TOH(reinterpret_cast<mlx5_cqe64*>(cqeAddr)->wqe_counter);
+  *wqeCounter = wqeCounter(reinterpret_cast<mlx5_cqe64*>(cqeAddr)->wqe_counter);//硬件在完成 WQE 后，在 CQE 中返回的一个标识符，对应于原始 WQE 提交时的计数器值
   return opcode;
 }
 

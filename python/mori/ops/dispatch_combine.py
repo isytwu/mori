@@ -174,33 +174,40 @@ class EpDispatchCombineOp:
             self.config.max_num_inp_token_per_rank * self.config.num_experts_per_token,
         )
 
-        cur_rank_num_token = self._get_cur_rank_num_token(self._handle)
+        cur_rank_num_token = self._get_cur_rank_num_token(self._handle)# 获取rank的token数
         all_rank_num_token = [torch.empty(1) for i in range(self.config.world_size)]
         dist.all_gather(all_rank_num_token, torch.Tensor([cur_rank_num_token]))
 
         reverse_sender_token_id_map = {}
-        for r in range(self.config.world_size):
+        for r in range(self.config.world_size):#遍历所有的topk idx，r是sender
             for i, mapped_id in enumerate(
                 all_rank_sender_map[r].tolist()[
                     : int(all_rank_num_token[r][0].item())
                     * self.config.num_experts_per_token
                 ]
-            ):
+            ):#i是topk idx的索引，mapped_id是peSortedIdx
                 dest_pe = mapped_id // max_num_token_to_send_per_rank
-                if dest_pe != self.config.rank:
+                if dest_pe != self.config.rank:#找所有发送对象是本rank的，同样也排除重复的情况（destPe = nPes）
                     continue
                 mapped_id = (
                     mapped_id
                     - dest_pe * max_num_token_to_send_per_rank
                     + r * max_num_token_to_send_per_rank
-                )
+                )  # 变成 srcPe * MaxNumTokensToRecvPerRank + destPeTokenIdx
                 reverse_sender_token_id_map[mapped_id] = (
-                    i // self.config.num_experts_per_token
+                    i // self.config.num_experts_per_token# local token号
                 )
         src_token_pos = []
         for i, recv_mapped_id in enumerate(dispatch_receiver_token_id_map.tolist()):
             src_pe = recv_mapped_id // max_num_token_to_send_per_rank
-            src_tok_id = reverse_sender_token_id_map[recv_mapped_id]
+            src_tok_id = reverse_sender_token_id_map[recv_mapped_id] 
             src_token_pos.append(src_pe * max_num_token_to_send_per_rank + src_tok_id)
 
         return torch.tensor(src_token_pos, dtype=torch.int)
+
+
+# peSortedIdx = destPe * MaxNumTokensToRecvPerRank + destPeTokenIdx; 发给destPe；destPeTokenIdx是send staging上的slot
+# args.dispSenderIdxMap[expertOffset] = peSortedIdx;
+
+# index_t peSortedId = destPe * MaxNumTokensToRecvPerRank + startRecvIdx + idx; 从destPe接收；startRecvIdx + idx是recv staging上的slot；成对的收发，两个slot是对应上的
+# args.dispReceiverIdxMap[localTokenIdx] = peSortedId

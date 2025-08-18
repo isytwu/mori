@@ -223,10 +223,10 @@ class EpDispatchCombineTestCase:
             print("Dispatch Pass")
 
         total_recv_num_token = dispatch_recv_num_token[0].item()
-        combine_input = op.get_registered_input_buffer(self.config.data_type)
+        combine_input = op.get_registered_input_buffer(self.config.data_type)# GetRegisteredInputBuffer的实现就是从shmemInpTokMemObj获取一个tensor
         combine_input[:total_recv_num_token, :].copy_(
             dispatch_output[:total_recv_num_token, :]
-        )
+        )#手动拷贝了一下
 
         combine_input = dispatch_output
         combine_input_weight = dispatch_weights

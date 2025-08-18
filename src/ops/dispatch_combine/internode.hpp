@@ -21,7 +21,7 @@ __device__ void SyncIfDebugEnabled(const char* msg) {
   __syncthreads();
 #endif
 }
-
+//TODO 优化：少用block性能相同；atomic换imm？
 /* ---------------------------------------------------------------------------------------------- */
 /*                                    EpDispatchInterNodeKernel                                   */
 /* ---------------------------------------------------------------------------------------------- */
@@ -59,7 +59,7 @@ __global__ void EpDispatchInterNodeKernel(EpDispatchCombineArgs<T> args) {
 
   extern __shared__ char sharedMem[];
 
-  int subWarpNumPerWarp = warpSize / numExpertPerToken;
+  int subWarpNumPerWarp = warpSize / numExpertPerToken;//32/topk，每个EP对应一个subwarp
   int laneInSubWarp = laneId % numExpertPerToken;
   int subWarpId = laneId / numExpertPerToken;
   int globalSubWarpId = globalWarpId * subWarpNumPerWarp + subWarpId;
@@ -85,14 +85,14 @@ __global__ void EpDispatchInterNodeKernel(EpDispatchCombineArgs<T> args) {
         continue;
       } else {
         index_t destPeTokenIdx = 0, peSortedIdx = 0;
-        destPeTokenIdx = atomicAdd(args.destPeTokenCounter + destPe, 1);
-        peSortedIdx = destPe * MaxNumTokensToRecvPerRank + destPeTokenIdx;
-        args.dispSenderIdxMap[expertOffset] = peSortedIdx;
-        args.destPeTokenIdxMap[peSortedIdx] = tokenId;
+        destPeTokenIdx = atomicAdd(args.destPeTokenCounter + destPe, 1);//和intranode不同，这里不是所有pe对于destPE取号
+        peSortedIdx = destPe * MaxNumTokensToRecvPerRank + destPeTokenIdx;//写入staging的位置
+        args.dispSenderIdxMap[expertOffset] = peSortedIdx;//给combine也输出给用户：topk_idx和staging位置
+        args.destPeTokenIdxMap[peSortedIdx] = tokenId;  //给dispatch：input的tokenId拷贝到shmemStagingTokMemObj的peSortedIdx，也就是记录了src token的信息；因为后面chunk是按照发送的总token划分的，需要知道每个staging的位置从哪个token拷贝
         __threadfence();
       }
     }
-  }
+  }  // 优化了去重逻辑，增加了subwarp，另外用了__match_any_sync；已经计算好了发给每个PE多少token-destPeTokenCounter，以及位置
 
   if (laneId == 0) {
     int old_val = atomicAdd(args.dispatchGridBarrier, 1);
@@ -103,14 +103,14 @@ __global__ void EpDispatchInterNodeKernel(EpDispatchCombineArgs<T> args) {
 
   if (laneId == 0) {
     shmem::ShmemUint32WaitUntilEquals(args.dispatchGridBarrier, 0);
-  }
+  }//所有warp的同步，TODO 会有bug：99行很多warp都在置0，连续做同步，其他进去下一轮的warp加1会被置0
 
   // TODO: block num should be multiple of npes
   const int numsBlockPerDestPe = gridDim.x / npes;
   const int destPe = blockIdx.x / numsBlockPerDestPe;
   const int destNode = destPe / MAX_GPUS_PER_NODE;
   const int localBlockId = blockIdx.x - destPe * numsBlockPerDestPe;
-  const int totalTokens = args.destPeTokenCounter[destPe];
+  const int totalTokens = args.destPeTokenCounter[destPe];//要发给destPe的总token
   const int baseChunk = totalTokens / numsBlockPerDestPe;
   const int remainder = totalTokens % numsBlockPerDestPe;
 
@@ -122,11 +122,11 @@ __global__ void EpDispatchInterNodeKernel(EpDispatchCombineArgs<T> args) {
   if (destNode == myNode) {
     // intra node use xgmi for transfer
     for (int idx = warpId; idx < endIdx - startIdx; idx += warpNum) {
-      const index_t mapIdx = destPe * MaxNumTokensToRecvPerRank + startIdx + idx;
+      const index_t mapIdx = destPe * MaxNumTokensToRecvPerRank + startIdx + idx;//send到staging的slot号
       size_t mapIdxOffset = mapIdx * stagingOffset;
       const index_t tokenId = args.destPeTokenIdxMap[mapIdx];
       size_t tokenOffset = tokenId * size_t(config.hiddenDim) * sizeof(T);
-      const index_t peSortedId = myPe * MaxNumTokensToRecvPerRank + startIdx + idx;
+      const index_t peSortedId = myPe * MaxNumTokensToRecvPerRank + startIdx + idx;//recv staging即shmemInpTokMemObj的写入位置slot号
       size_t peSortedOffset = peSortedId * stagingOffset;
       core::WarpCopy(args.shmemStagingTokMemObj->template GetAs<char*>() + mapIdxOffset,
                      reinterpret_cast<char*>(args.inpTokenBuf) + tokenOffset,
@@ -160,8 +160,8 @@ __global__ void EpDispatchInterNodeKernel(EpDispatchCombineArgs<T> args) {
       gatherTokenNum[idx] = 0;
     }
     __syncthreads();
-    const int chunkTokenSize = (warpNum - 1);
-    if (warpId == warpNum - 1) {
+    const int chunkTokenSize = (warpNum - 1);//要聚合的token数
+    if (warpId == warpNum - 1) {//调用ibgda接口
       const int totalTokenInBlock = endIdx - startIdx;
       int chunkOffset = 0;
       int chunkIdx = 0;
@@ -171,7 +171,7 @@ __global__ void EpDispatchInterNodeKernel(EpDispatchCombineArgs<T> args) {
                                  : chunkTokenSize;
         if (laneId == 0) {
           while (atomicAdd(&gatherTokenNum[chunkIdx], 0) < actualTokenNum) {
-            ;
+            ;  // aggregate 所有warp的token
           }
         }
         // rdma_send
@@ -186,7 +186,7 @@ __global__ void EpDispatchInterNodeKernel(EpDispatchCombineArgs<T> args) {
         ++chunkIdx;
         chunkOffset += chunkTokenSize;
       }
-    } else {
+    } else {//负责拷贝到staging
       // int warpTokens = 0;
       int chunkIdx = 0;
       for (int idx = warpId; idx < endIdx - startIdx; idx += chunkTokenSize) {
@@ -216,7 +216,7 @@ __global__ void EpDispatchInterNodeKernel(EpDispatchCombineArgs<T> args) {
                   tokenId * config.scaleDim * config.scaleTypeSize,
               config.scaleDim * config.scaleTypeSize);
         }
-        if (laneId == 0) atomicAdd(&gatherTokenNum[chunkIdx++], 1);
+        if (laneId == 0) atomicAdd(&gatherTokenNum[chunkIdx++], 1);//通知协调warp，一个token已经拷入staging
       }
       // if (laneId == 0 && warpTokens) atomicAdd(&gatherTokenNum, warpTokens);
       __threadfence_block();
@@ -225,24 +225,24 @@ __global__ void EpDispatchInterNodeKernel(EpDispatchCombineArgs<T> args) {
 
   __shared__ index_t recvTokenNum;
   __syncthreads();
-  if (thdId == 0) {
+  if (thdId == 0) {//同组block都会进来
     // shmem::ShmemAtomicTypeNonFetchWarp<int32_t>(args.recvTokenNumMemObj, myPe * sizeof(index_t),
     //                                         args.shmemStagingTokMemObj->GetMemoryRegion(myPe),
     //                                         myPe * sizeof(index_t), (int32_t)(totalTokens+1),
     //                                         destPe, core::AMO_SET);
     int doneBlockNum = atomicAdd(&args.dispatchGridBarrier[destPe], 1);
-    if (doneBlockNum == numsBlockPerDestPe - 1) {
+    if (doneBlockNum == numsBlockPerDestPe - 1) {// numsBlockPerDestPe个block处理发到同一个destPe，这几个block的同步保证destPe都发完了;最后add的block会进来
       shmem::ShmemPutInt32ImmNbiThread(args.recvTokenNumMemObj, myPe * sizeof(index_t),
-                                       totalTokens + 1, destPe);
+                                       totalTokens + 1, destPe);//recvTokenNumMemObj也是个symm buffer，写入的是自己发给destP的token数
       __hip_atomic_store(&args.dispatchGridBarrier[destPe], 0, __ATOMIC_RELAXED,
-                         __HIP_MEMORY_SCOPE_AGENT);
+                         __HIP_MEMORY_SCOPE_AGENT);//TODO 同一组的block同步，同样会有bug
     }
   }
   if (thdId == 0) {
-    index_t* signal = args.recvTokenNumMemObj->template GetAs<index_t*>() + destPe;
+    index_t* signal = args.recvTokenNumMemObj->template GetAs<index_t*>() + destPe;//得到destPe发给自己的token数
     recvTokenNum = shmem::ShmemInt32WaitUntilGreaterThan(signal, 0) - 1;
     if (localBlockId == 0) {
-      atomicAdd(args.totalRecvTokenNum, recvTokenNum);
+      atomicAdd(args.totalRecvTokenNum, recvTokenNum);  // 把所有PE的recvTokenNum加起来，这看着是单机GetDispatchSrcTokenId用的
       args.destPeTokenCounter[destPe] = 0;
     }
     // if (localBlockId == 0) printf("rank[%d] destPe[%d] recvTokenNum: %d\n", myPe, destPe,
@@ -250,7 +250,7 @@ __global__ void EpDispatchInterNodeKernel(EpDispatchCombineArgs<T> args) {
   }
   __syncthreads();
 
-  const int baseRecvChunk = recvTokenNum / numsBlockPerDestPe;
+  const int baseRecvChunk = recvTokenNum / numsBlockPerDestPe;//这里recvTokenNum在sh mem上
   const int recvRemainder = recvTokenNum % numsBlockPerDestPe;
   const int myRecvChunkSize = baseRecvChunk + (localBlockId < recvRemainder);
   // if (localBlockId == 0 && thdId == 0) printf("rank[%d] destPe[%d] myRecvChunkSize: %d\n", myPe,
@@ -260,10 +260,10 @@ __global__ void EpDispatchInterNodeKernel(EpDispatchCombineArgs<T> args) {
   for (int idx = warpId; idx < myRecvChunkSize; idx += warpNum) {
     index_t localTokenIdx = 0;
     if (laneId == 0) {
-      localTokenIdx = atomicAdd(args.localPeTokenCounter, 1);
+      localTokenIdx = atomicAdd(args.localPeTokenCounter, 1);//这里取号又会导致乱序；args.localPeTokenCounter和args.totalRecvTokenNum 真的不是完全相等吗
     }
     localTokenIdx = __shfl(localTokenIdx, 0);
-    index_t peSortedId = destPe * MaxNumTokensToRecvPerRank + startRecvIdx + idx;
+    index_t peSortedId = destPe * MaxNumTokensToRecvPerRank + startRecvIdx + idx;//这里指从destPe收到的token，这个编号就包含了src的信息
 
     size_t localTokenOffset = size_t(localTokenIdx) * size_t(config.hiddenDim) * sizeof(T);
     size_t peSortedTokenOffset = size_t(peSortedId) * stagingOffset;
@@ -289,8 +289,8 @@ __global__ void EpDispatchInterNodeKernel(EpDispatchCombineArgs<T> args) {
           config.scaleDim * config.scaleTypeSize);
     }
     if (laneId == 0) {
-      args.dispReceiverIdxMap[localTokenIdx] = peSortedId;
-      args.srcPeTokenIdxMap[peSortedId] = localTokenIdx;
+      args.dispReceiverIdxMap[localTokenIdx] = peSortedId;  // 给用户：destTokId和staging位置；这里有一个坑-peSortedId和前面是不同的，虽然都是startRecvIdx + idx(注意recv)，但send是根据sendTokens划分block的，recv这边是recvToken划分
+      args.srcPeTokenIdxMap[peSortedId] = localTokenIdx;//给combine
     }
   }
   SyncIfDebugEnabled("Dispatch kernel: kernel end");
@@ -358,14 +358,14 @@ __global__ void EpCombineInterNodeKernel(EpDispatchCombineArgs<T> args) {
   // This phase is symmetric with dispatch recv phase, where tokens are first sent back to its
   // source pe in pe sorted order
   const int numsBlockPerSrcPe = gridDim.x / npes;
-  const int srcPe = blockIdx.x / numsBlockPerSrcPe;
+  const int srcPe = blockIdx.x / numsBlockPerSrcPe;//几个block处理一个pe
   const int srcNode = srcPe / MAX_GPUS_PER_NODE;
   const int localBlockId = blockIdx.x - srcPe * numsBlockPerSrcPe;
   const int srcPeTokenNum = *(args.recvTokenNumMemObj->template GetAs<index_t*>() + srcPe) - 1;
-  const int baseChunk = srcPeTokenNum / numsBlockPerSrcPe;
-  const int remainder = srcPeTokenNum % numsBlockPerSrcPe;
+  const int baseChunk = srcPeTokenNum / numsBlockPerSrcPe;//token再均分给block，应该叫baseChunkToken
+  const int remainder = srcPeTokenNum % numsBlockPerSrcPe;//剩下的token？reminder什么鬼命名
 
-  const int myChunkSize = baseChunk + (localBlockId < remainder);
+  const int myChunkSize = baseChunk + (localBlockId < remainder);//numTokenPerBlock
 
   const int startIdx = localBlockId * baseChunk + min(localBlockId, remainder);
   const int endIdx = startIdx + myChunkSize;

@@ -73,7 +73,7 @@ struct EpDispatchCombineConfig {
   }
 
   inline __host__ __device__ int MaxNumTokensToRecvPerRank() const {
-    return maxNumInpTokenPerRank * std::min(numExpertPerRank, numExpertPerToken);
+    return maxNumInpTokenPerRank * std::min(numExpertPerRank, numExpertPerToken);//recv方最多收这么多token，不知道有没有对于numExpertPerRank更小的情况的处理
   }
 
   inline __host__ __device__ int MaxNumTokensToRecv() const {

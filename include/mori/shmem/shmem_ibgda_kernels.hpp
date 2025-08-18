@@ -312,7 +312,7 @@ template <>
 inline __device__ void ShmemPutSizeImmNbiThreadKernel<application::TransportType::RDMA>(
     const application::SymmMemObjPtr dest, size_t destOffset, void* val, size_t bytes, int pe) {
   DISPATCH_PROVIDER_TYPE(ShmemPutSizeImmNbiThreadKernelImpl, dest, destOffset, val, bytes, pe);
-}
+}//
 
 template <core::ProviderType PrvdType>
 inline __device__ void ShmemPutSizeImmNbiWarpKernelImpl(const application::SymmMemObjPtr dest,

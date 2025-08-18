@@ -52,7 +52,7 @@ Mlx5CqContainer::Mlx5CqContainer(ibv_context* context, const RdmaEndpointConfig&
   int status;
   uint8_t cmd_in[DEVX_ST_SZ_BYTES(create_cq_in)] = {
       0,
-  };
+  };  // DEVX_ST_SZ_BYTES：device exteneded interface；structure；size；bytes计算结构体create_cq_in的字节数
   uint8_t cmd_out[DEVX_ST_SZ_BYTES(create_cq_out)] = {
       0,
   };
@@ -73,7 +73,7 @@ Mlx5CqContainer::Mlx5CqContainer(ibv_context* context, const RdmaEndpointConfig&
     assert(!status);
   }
 
-  cqUmem = mlx5dv_devx_umem_reg(context, cqUmemAddr, cqSize, IBV_ACCESS_LOCAL_WRITE);
+  cqUmem = mlx5dv_devx_umem_reg(context, cqUmemAddr, cqSize, IBV_ACCESS_LOCAL_WRITE);//硬件可以直接访问这块内存来写入 CQE
   assert(cqUmem);
 
   // Allocate user memory for CQ DBR (doorbell?)
@@ -86,15 +86,15 @@ Mlx5CqContainer::Mlx5CqContainer(ibv_context* context, const RdmaEndpointConfig&
     assert(!status);
   }
 
-  cqDbrUmem = mlx5dv_devx_umem_reg(context, cqDbrUmemAddr, 8, IBV_ACCESS_LOCAL_WRITE);
+  cqDbrUmem = mlx5dv_devx_umem_reg(context, cqDbrUmemAddr, 8, IBV_ACCESS_LOCAL_WRITE);//记录当前消费的 CQE 索引,硬件通过这个记录知道哪些 CQE 已经被处理
   assert(cqDbrUmem);
 
   // Allocate user access region
-  uar = mlx5dv_devx_alloc_uar(context, MLX5DV_UAR_ALLOC_TYPE_NC);
+  uar = mlx5dv_devx_alloc_uar(context, MLX5DV_UAR_ALLOC_TYPE_NC);//用户空间可以直接访问的硬件寄存器页面,Non-Cached 类型，确保写入立即到达硬件
   assert(uar->page_id != 0);
 
   // Initialize CQ
-  DEVX_SET(create_cq_in, cmd_in, opcode, MLX5_CMD_OP_CREATE_CQ);
+  DEVX_SET(create_cq_in, cmd_in, opcode, MLX5_CMD_OP_CREATE_CQ);//DecX接口Device eXtended interface
   DEVX_SET(create_cq_in, cmd_in, cq_umem_valid, 0x1);
   DEVX_SET(create_cq_in, cmd_in, cq_umem_id, cqUmem->umem_id);
 
@@ -104,7 +104,7 @@ Mlx5CqContainer::Mlx5CqContainer(ibv_context* context, const RdmaEndpointConfig&
   DEVX_SET(cqc, cq_context, log_cq_size, LogCeil2(cqeNum));
   DEVX_SET(cqc, cq_context, uar_page, uar->page_id);
 
-  uint32_t eqn;
+  uint32_t eqn;//事件队列编号
   status = mlx5dv_devx_query_eqn(context, 0, &eqn);
   assert(!status);
   DEVX_SET(cqc, cq_context, c_eqn, eqn);
@@ -144,8 +144,8 @@ void Mlx5QpContainer::ComputeQueueAttrs(const RdmaEndpointConfig& config) {
   rqAttrs.offset = 0;
 
   // Send queue attributes
-  sqAttrs.offset = rqAttrs.wqSize;
-  sqAttrs.wqeSize = GetMlx5SqWqeSize();
+  sqAttrs.offset = rqAttrs.wqSize;//sq在rq后面？
+  sqAttrs.wqeSize = GetMlx5SqWqeSize();//16B
   sqAttrs.wqSize = RoundUpPowOfTwo(sqAttrs.wqeSize * config.maxMsgsNum);
   sqAttrs.wqeNum = ceil(sqAttrs.wqSize / MLX5_SEND_WQE_BB);
   sqAttrs.wqeShift = MLX5_SEND_WQE_SHIFT;
@@ -263,8 +263,8 @@ void Mlx5QpContainer::DestroyQueuePair() {
 void* Mlx5QpContainer::GetSqAddress() { return static_cast<char*>(qpUmemAddr) + sqAttrs.offset; }
 
 void* Mlx5QpContainer::GetRqAddress() { return static_cast<char*>(qpUmemAddr) + rqAttrs.offset; }
-
-void Mlx5QpContainer::ModifyRst2Init() {
+// RESET → INIT → RTR (Ready to Receive) → RTS (Ready to Send) → SQD → ERROR
+void Mlx5QpContainer::ModifyRst2Init() {//基本权限和端口配置
   uint8_t rst2init_cmd_in[DEVX_ST_SZ_BYTES(rst2init_qp_in)] = {
       0,
   };
@@ -278,8 +278,8 @@ void Mlx5QpContainer::ModifyRst2Init() {
   void* qpc = DEVX_ADDR_OF(rst2init_qp_in, rst2init_cmd_in, qpc);
   DEVX_SET(qpc, qpc, rwe, 1); /* remote write access */
   DEVX_SET(qpc, qpc, rre, 1); /* remote read access */
-  DEVX_SET(qpc, qpc, rae, 1); 
-  DEVX_SET(qpc, qpc, atomic_mode, 0x3);
+  DEVX_SET(qpc, qpc, rae, 1);
+  DEVX_SET(qpc, qpc, atomic_mode, 0x3);  // 0x3 = 支持所有原子操作
   DEVX_SET(qpc, qpc, primary_address_path.vhca_port_num, config.portId);
 
   DEVX_SET(qpc, qpc, pm_state, 0x3);
@@ -291,7 +291,7 @@ void Mlx5QpContainer::ModifyRst2Init() {
 }
 
 void Mlx5QpContainer::ModifyInit2Rtr(const RdmaEndpointHandle& remote_handle,
-                                     const ibv_port_attr& portAttr) {
+                                     const ibv_port_attr& portAttr) {//配置远程端点信息
   uint8_t init2rtr_cmd_in[DEVX_ST_SZ_BYTES(init2rtr_qp_in)] = {
       0,
   };
@@ -303,12 +303,12 @@ void Mlx5QpContainer::ModifyInit2Rtr(const RdmaEndpointHandle& remote_handle,
   DEVX_SET(init2rtr_qp_in, init2rtr_cmd_in, qpn, qpn);
 
   void* qpc = DEVX_ADDR_OF(init2rtr_qp_in, init2rtr_cmd_in, qpc);
-  DEVX_SET(qpc, qpc, mtu, portAttr.active_mtu);
-  DEVX_SET(qpc, qpc, log_msg_max, 30);
-  DEVX_SET(qpc, qpc, remote_qpn, remote_handle.qpn);
-  DEVX_SET(qpc, qpc, next_rcv_psn, remote_handle.psn);
-  DEVX_SET(qpc, qpc, min_rnr_nak, 12);
-  DEVX_SET(qpc, qpc, log_rra_max, 20);
+  DEVX_SET(qpc, qpc, mtu, portAttr.active_mtu);         // 最大传输单元
+  DEVX_SET(qpc, qpc, log_msg_max, 30);                  // 最大消息大小（2^30）
+  DEVX_SET(qpc, qpc, remote_qpn, remote_handle.qpn);    // 远程QP编号
+  DEVX_SET(qpc, qpc, next_rcv_psn, remote_handle.psn);  // 期望接收的包序列号
+  DEVX_SET(qpc, qpc, min_rnr_nak, 12);                  // RNR NAK 最小延迟(Receiver Not Ready;Negative Acknowledgment 队列满时触发，收到NAK之后等待的时长)
+  DEVX_SET(qpc, qpc, log_rra_max, 20);                  // 最大读取响应数
 
   qpc = DEVX_ADDR_OF(init2rtr_qp_in, init2rtr_cmd_in, qpc);
   DEVX_SET(qpc, qpc, primary_address_path.vhca_port_num, config.portId);
@@ -320,9 +320,9 @@ void Mlx5QpContainer::ModifyInit2Rtr(const RdmaEndpointHandle& remote_handle,
 
     memcpy(DEVX_ADDR_OF(qpc, qpc, primary_address_path.rmac_47_32), remote_handle.eth.mac,
            sizeof(remote_handle.eth.mac));
-    DEVX_SET(qpc, qpc, primary_address_path.hop_limit, 64);
+    DEVX_SET(qpc, qpc, primary_address_path.hop_limit, 64);//TTL
     DEVX_SET(qpc, qpc, primary_address_path.src_addr_index, config.gidIdx);
-    DEVX_SET(qpc, qpc, primary_address_path.udp_sport, 0xC000);
+    DEVX_SET(qpc, qpc, primary_address_path.udp_sport, 0xC000);  // UDP源端口
   } else if (portAttr.link_layer == IBV_LINK_LAYER_INFINIBAND) {
     DEVX_SET(qpc, qpc, primary_address_path.rlid, remote_handle.ib.lid);
   } else {
@@ -346,11 +346,11 @@ void Mlx5QpContainer::ModifyRtr2Rts(const RdmaEndpointHandle& local_handle) {
   DEVX_SET(rtr2rts_qp_in, rtr2rts_cmd_in, qpn, qpn);
 
   void* qpc = DEVX_ADDR_OF(rtr2rts_qp_in, rtr2rts_cmd_in, qpc);
-  DEVX_SET(qpc, qpc, log_sra_max, 20);
-  DEVX_SET(qpc, qpc, next_send_psn, local_handle.psn);
-  DEVX_SET(qpc, qpc, retry_count, 7);
-  DEVX_SET(qpc, qpc, rnr_retry, 7);
-  DEVX_SET(qpc, qpc, primary_address_path.ack_timeout, 20);
+  DEVX_SET(qpc, qpc, log_sra_max, 20);                       // 最大发送请求数
+  DEVX_SET(qpc, qpc, next_send_psn, local_handle.psn);       // 下一个发送包序列号
+  DEVX_SET(qpc, qpc, retry_count, 7);                        // 重试次数
+  DEVX_SET(qpc, qpc, rnr_retry, 7);                          // RNR 重试次数
+  DEVX_SET(qpc, qpc, primary_address_path.ack_timeout, 20);  // ACK 超时
   DEVX_SET(qpc, qpc, primary_address_path.vhca_port_num, config.portId);
 
   int status = mlx5dv_devx_obj_modify(qp, rtr2rts_cmd_in, sizeof(rtr2rts_cmd_in), rtr2rts_cmd_out,
@@ -369,7 +369,7 @@ Mlx5DeviceContext::Mlx5DeviceContext(RdmaDevice* rdma_device, ibv_pd* in_pd)
   dv_obj.pd.out = &dvpd;
   int status = mlx5dv_init_obj(&dv_obj, MLX5DV_OBJ_PD);
   assert(!status);
-  pdn = dvpd.pdn;
+  pdn = dvpd.pdn;//这里专门用dv verbs接口获取了pdn？
 }
 
 Mlx5DeviceContext::~Mlx5DeviceContext() {}
@@ -461,7 +461,7 @@ Mlx5Device::~Mlx5Device() {}
 
 RdmaDeviceContext* Mlx5Device::CreateRdmaDeviceContext() {
   ibv_pd* pd = ibv_alloc_pd(defaultContext);
-  return new Mlx5DeviceContext(this, pd);
+  return new Mlx5DeviceContext(this, pd);//构造 获取了pdn
 }
 
 }  // namespace application

@@ -79,11 +79,11 @@ struct EthernetEndpointHandle {
 
 // TODO: add gid type
 struct RdmaEndpointHandle {
-  uint32_t psn{0};
-  uint32_t qpn{0};
-  uint32_t portId{0};
-  InfiniBandEndpointHandle ib;
-  EthernetEndpointHandle eth;
+  uint32_t psn{0};              // 包序列号
+  uint32_t qpn{0};              // 队列对编号
+  uint32_t portId{0};           // 端口ID
+  InfiniBandEndpointHandle ib;  // InfiniBand 特定信息
+  EthernetEndpointHandle eth;   // 以太网特定信息
 
   constexpr bool operator==(const RdmaEndpointHandle& rhs) const noexcept {
     return psn == rhs.psn && qpn == rhs.qpn && portId == rhs.portId && ib == rhs.ib &&
@@ -129,7 +129,7 @@ struct IBVerbsHandle {
 
 struct RdmaEndpoint {
   RdmaDeviceVendorId vendorId{RdmaDeviceVendorId::Unknown};
-  RdmaEndpointHandle handle;
+  RdmaEndpointHandle handle;  // allgather获取所有rank的handle
   // TODO(@ditian12): we should use an opaque handle to reference the actual transport context
   // handles, for direct verbs it should be WorkQueueHandle/CompletionQueueHandle, for ib verbs, it
   // should be ibv structures

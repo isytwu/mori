@@ -102,7 +102,7 @@ __device__ void Quite(RdmaEndpoint* endpoint) {
             __hip_atomic_load(&cqHandle->consIdx, __ATOMIC_SEQ_CST, __HIP_MEMORY_SCOPE_AGENT);
       } while (completed != warp_cq_consumer);
       UpdateCqDbrRecord<core::ProviderType::MLX5>(cqHandle->dbrRecAddr,
-                                                  (uint32_t)(warp_cq_consumer + quiet_amount));
+                                                  (uint32_t)(warp_cq_consumer + quiet_amount));//告诉硬件哪些完成队列条目 (CQE) 已经被软件消费完毕，可以被硬件复用。
       __atomic_signal_fence(__ATOMIC_SEQ_CST);
 
       uint64_t doneIdx = wqe_broadcast[warp_id];
@@ -121,7 +121,7 @@ __global__ void Write(RdmaEndpoint* endpoint, RdmaMemoryRegion localMr, RdmaMemo
     uint8_t num_active_lanes = GetActiveLaneCount(activemask);
     uint8_t my_logical_lane_id = GetActiveLaneNum(activemask);
     bool is_leader{my_logical_lane_id == 0};
-    const uint64_t leader_phys_lane_id = GetFirstActiveLaneID(activemask);
+    const uint64_t leader_phys_lane_id = GetFirstActiveLaneID(activemask);  // my_logical_lane_id对应的物理id
     uint8_t num_wqes{num_active_lanes};
     uint64_t warp_sq_counter{0};
     WorkQueueHandle* wqHandle = &endpoint->wqHandle;
@@ -136,12 +136,12 @@ __global__ void Write(RdmaEndpoint* endpoint, RdmaMemoryRegion localMr, RdmaMemo
     uint64_t my_sq_index = my_sq_counter % wqHandle->sqWqeNum;
     while (true) {
       uint64_t db_touched =
-          __hip_atomic_load(&wqHandle->dbTouchIdx, __ATOMIC_SEQ_CST, __HIP_MEMORY_SCOPE_AGENT);
+          __hip_atomic_load(&wqHandle->dbTouchIdx, __ATOMIC_SEQ_CST, __HIP_MEMORY_SCOPE_AGENT);//ring dbr之后一次加num_wqes
       uint64_t db_done =
           __hip_atomic_load(&wqHandle->doneIdx, __ATOMIC_SEQ_CST, __HIP_MEMORY_SCOPE_AGENT);
       uint64_t num_active_sq_entries = db_touched - db_done;
       uint64_t num_free_entries = min(wqHandle->sqWqeNum, cqHandle->cqeNum) - num_active_sq_entries;
-      uint64_t num_entries_until_wave_last_entry = warp_sq_counter + num_active_lanes - db_touched;
+      uint64_t num_entries_until_wave_last_entry = warp_sq_counter + num_active_lanes - db_touched;//需要post的数量？
       if (num_free_entries > num_entries_until_wave_last_entry) {
         break;
       }
@@ -163,7 +163,7 @@ __global__ void Write(RdmaEndpoint* endpoint, RdmaMemoryRegion localMr, RdmaMemo
 
       uint8_t* base_ptr = reinterpret_cast<uint8_t*>(wqHandle->sqAddr);
       uint64_t* ctrl_wqe_8B_for_db = reinterpret_cast<uint64_t*>(
-          &base_ptr[64 * ((warp_sq_counter + num_wqes - 1) % wqHandle->sqWqeNum)]);
+          &base_ptr[64 * ((warp_sq_counter + num_wqes - 1) % wqHandle->sqWqeNum)]);//wqe slot的大小为64字节，后面是最后一个wqe的索引，得到最后一个wqe的绝对地址
       UpdateSendDbrRecord<ProviderType::MLX5>(wqHandle->dbrRecAddr, warp_sq_counter + num_wqes);
       // __threadfence_system();
       RingDoorbell<ProviderType::MLX5>(wqHandle->dbrAddr, *ctrl_wqe_8B_for_db);
@@ -210,7 +210,7 @@ void distRdmaOps(int argc, char* argv[]) {
   RdmaDevice* device = activeDevicePortList[local_rank % activeDevicePortList.size()].first;
   std::cout << "localRank " << local_rank << " select device " << device->Name() << std::endl;
 
-  RdmaDeviceContext* device_context = device->CreateRdmaDeviceContext();
+  RdmaDeviceContext* device_context = device->CreateRdmaDeviceContext();//创建PD
 
   // 2 Create an endpoint
   RdmaEndpointConfig config;
@@ -220,15 +220,15 @@ void distRdmaOps(int argc, char* argv[]) {
   config.maxCqeNum = 4096;
   config.alignment = 4096;
   config.onGpu = on_gpu;
-  RdmaEndpoint endpoint = device_context->CreateRdmaEndpoint(config);
+  RdmaEndpoint endpoint = device_context->CreateRdmaEndpoint(config);//创建QP CQ
 
-  // 3 Allgather global endpoint and connect
+  // 3 Allgather global endpoint and connect 交换端点信息
   std::vector<RdmaEndpointHandle> global_rdma_ep_handles(world_size);
   bootNet.Allgather(&endpoint.handle, global_rdma_ep_handles.data(), sizeof(RdmaEndpointHandle));
 
   std::cout << "Local rank " << local_rank << " " << endpoint.handle << std::endl;
 
-  for (int i = 0; i < world_size; i++) {
+  for (int i = 0; i < world_size; i++) {//TODO 这个怕是没有用，RC建链只能一对一
     if (i == local_rank) continue;
     device_context->ConnectEndpoint(endpoint.handle, global_rdma_ep_handles[i]);
     std::cout << "Local rank " << local_rank << " received " << global_rdma_ep_handles[i]
@@ -245,9 +245,9 @@ void distRdmaOps(int argc, char* argv[]) {
   // assert(!posix_memalign(&buffer_1, 4096, allreduce_size));
   // memset(buffer_1, 1, allreduce_size);
   RdmaMemoryRegion mr_handle =
-      device_context->RegisterRdmaMemoryRegion(buffer, totalSize, MR_ACCESS_FLAG);
+      device_context->RegisterRdmaMemoryRegion(buffer, totalSize, MR_ACCESS_FLAG);//device_context 包含一个pd
   std::vector<RdmaMemoryRegion> global_mr_handles(world_size);
-  bootNet.Allgather(&mr_handle, global_mr_handles.data(), sizeof(mr_handle));
+  bootNet.Allgather(&mr_handle, global_mr_handles.data(), sizeof(mr_handle));  // 交换内存区域信息
   global_mr_handles[local_rank] = mr_handle;
   RdmaEndpoint* devEndpoint;
   HIP_RUNTIME_CHECK(hipMalloc(&devEndpoint, sizeof(RdmaEndpoint)));

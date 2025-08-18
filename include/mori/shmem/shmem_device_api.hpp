@@ -136,8 +136,8 @@ SHMEM_PUT_TYPE_IMM_NBI_API_TEMPLATE(Warp)
 #define DEFINE_SHMEM_PUT_TYPE_IMM_NBI_API(TypeName, T, Scope)                           \
   inline __device__ void ShmemPut##TypeName##ImmNbi##Scope(                             \
       const application::SymmMemObjPtr dest, size_t destOffset, uint32_t val, int pe) { \
-    ShmemPutTypeImmNbi##Scope<T>(dest, destOffset, val, pe);                     \
-  }
+    ShmemPutTypeImmNbi##Scope<T>(dest, destOffset, val, pe);                            \
+  }  // 由TypeName决定类型，destOffset加在uintptr_t指针上
 
 DEFINE_SHMEM_PUT_TYPE_IMM_NBI_API(Uint8, uint8_t, Thread)
 DEFINE_SHMEM_PUT_TYPE_IMM_NBI_API(Int8, int8_t, Thread)
