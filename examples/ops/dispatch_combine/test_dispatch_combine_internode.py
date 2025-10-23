@@ -114,7 +114,7 @@ class EpDispatchCombineTestCase:
         dist.all_gather(output, padded_input)
         return output
 
-    def gen_test_data(self, use_max_token_num=False):
+    def gen_test_data(self, round=0, use_max_token_num=False):
         # gen num_tokens
         if use_max_token_num:
             num_token = torch.tensor(
@@ -238,13 +238,24 @@ class EpDispatchCombineTestCase:
         # gen input & output
         # some functions such as randn and cat are not implemented for fp8
         all_rank_input = []
+        # for r in range(self.world_size):
+        #     all_rank_input.append(
+        #         torch.randn(
+        #             num_token[r],
+        #             self.config.hidden_dim,
+        #             dtype=torch.float32,
+        #             generator=self.rng,
+        #             device=self.device,
+        #         ).to(self.config.data_type)
+        #     )
+
         for r in range(self.world_size):
             all_rank_input.append(
-                torch.randn(
-                    num_token[r],
-                    self.config.hidden_dim,
+                torch.full(
+                    (num_token[r], self.config.hidden_dim),
+                    # fill_value=float((r + 1) * 10.0 + round),
+                    fill_value=float(r + 1),
                     dtype=torch.float32,
-                    generator=self.rng,
                     device=self.device,
                 ).to(self.config.data_type)
             )
@@ -398,9 +409,9 @@ class EpDispatchCombineTestCase:
         for i in range(5000):
             if self.rank == 0:
                 print(f"Round {i} begin")
-            test_data = self.gen_test_data(use_max_token_num=False)
+            test_data = self.gen_test_data(round=i, use_max_token_num=False)
             if self.rank == 0:
-                print(f"Round {i} gen test_data done")
+                print(f"Round {i} gen test_data done num_token {test_data[0]}")
             self.run_test_once(op, test_data, error_round, i)
         print(
             "rank: ",
@@ -507,7 +518,7 @@ class EpDispatchCombineTestCase:
 
     def bench_dispatch_combine(self):
         op = mori.ops.EpDispatchCombineOp(self.config)
-        test_data = self.gen_test_data(use_max_token_num=True)
+        test_data = self.gen_test_data(round=0, use_max_token_num=True)
 
         disp_duration_us_list = []
         disp_rdma_bandwidth_GB_list = []
@@ -517,7 +528,7 @@ class EpDispatchCombineTestCase:
         comb_bandwidth_GB_list = []
 
         error_round = set()
-        for i in range(1):
+        for i in range(10):
             if self.rank == 0:
                 print(f"WarmUp Round {i} begin")
             self.run_test_once(op, test_data, error_round, i)
