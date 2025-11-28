@@ -237,7 +237,7 @@ template <ProviderType PrvdType>
 inline __device__ uint64_t PostWriteInline(void* queueBuffAddr, uint32_t wqeNum,
                                            uint32_t* postIdxOrNull, uint32_t plainPostIdx,
                                            uint32_t qpn, void* val, uintptr_t raddr, uint64_t rkey,
-                                           size_t bytes) {
+                                           size_t bytes) {//
   assert(bytes <= MaxInlineDataSizePerWqe);
 
   constexpr int sendWqeSize =
@@ -625,7 +625,7 @@ inline __device__ int PollCqOnce<ProviderType::MLX5>(void* cqeAddr, uint32_t cqe
 
   bool is_empty = true;
   for (int i = 0; i < (sizeof(mlx5_cqe64) / sizeof(uint64_t)); i++) {
-    if (atomicAdd(&reinterpret_cast<uint64_t*>(cqeAddr)[i], 0) != 0) {
+    if (atomicAdd(&reinterpret_cast<uint64_t*>(cqeAddr)[i], 0) != 0) {//这里出现hang， consIdx 比较大
       is_empty = false;
       break;
     }
@@ -636,7 +636,7 @@ inline __device__ int PollCqOnce<ProviderType::MLX5>(void* cqeAddr, uint32_t cqe
   int cq_owner_flip = !!(consIdx & cqeNum);
   if ((opcode == MLX5_CQE_INVALID) || (owner ^ cq_owner_flip) || is_empty) {
     return -1;
-  }
+  }//owner是硬件写入的值，假设cqeNum为4，那么第一轮0-3的flip为0
 
   *lastBytePtr = (MLX5_CQE_INVALID << 4) | (cq_owner_flip & 1);  // 标记 CQE 为已处理
   return opcode;
@@ -667,13 +667,13 @@ template <>
 inline __device__ int PollCq<ProviderType::MLX5>(void* cqAddr, uint32_t cqeNum, uint32_t* consIdx,
                                                  uint16_t* wqeCounter) {
   uint32_t curConsIdx = *consIdx;
-  uint32_t cqeIdx = curConsIdx % cqeNum;
+  uint32_t cqeIdx = curConsIdx % cqeNum;  // cqeNum在IntializePossibleTransports里是4096
   void* cqeAddr = reinterpret_cast<char*>(cqAddr) + cqeIdx * sizeof(mlx5_cqe64);
   // mlx5_cqe64* cqeAddr = reinterpret_cast<mlx5_cqe64*>(cqAddr) + cqeIdx;
 
   int opcode = -1;
   do {
-    opcode = PollCqOnce<ProviderType::MLX5>(cqeAddr, cqeNum, curConsIdx);
+    opcode = PollCqOnce<ProviderType::MLX5>(cqeAddr, cqeNum, curConsIdx);//
     asm volatile("" ::: "memory");
   } while (opcode < 0);
 
@@ -682,7 +682,7 @@ inline __device__ int PollCq<ProviderType::MLX5>(void* cqAddr, uint32_t cqeNum, 
     printf("(%s:%d) CQE error: %s\n", __FILE__, __LINE__, IbvWcStatusString(error));
     return opcode;
   }
-  *wqeCounter = wqeCounter(reinterpret_cast<mlx5_cqe64*>(cqeAddr)->wqe_counter);//硬件在完成 WQE 后，在 CQE 中返回的一个标识符，对应于原始 WQE 提交时的计数器值
+  *wqeCounter = BE16TOH(reinterpret_cast<mlx5_cqe64*>(cqeAddr)->wqe_counter);//硬件在完成 WQE 后，在 CQE 中返回的一个标识符，对应于原始 WQE 提交时的计数器值
   return opcode;
 }
 

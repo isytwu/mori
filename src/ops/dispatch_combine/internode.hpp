@@ -379,7 +379,7 @@ __global__ void EpCombineInterNodeKernel(EpDispatchCombineArgs<T> args) {
     for (int idx = warpId; idx < endIdx - startIdx; idx += warpNum) {
       const index_t mapIdx = srcPe * MaxNumTokensToRecvPerRank + startIdx + idx;
       size_t mapIdxOffset = mapIdx * tokenPackSize;
-      const index_t tokenId = args.srcPeTokenIdxMap[mapIdx];
+      const index_t tokenId = args.srcPeTokenIdxMap[mapIdx];//recv里的token slot更贴切
       size_t tokenOffset = tokenId * tokenSize;
       const index_t peSortedId = myPe * MaxNumTokensToRecvPerRank + startIdx + idx;
       size_t peSortedOffset = peSortedId * tokenPackSize;

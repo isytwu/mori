@@ -111,9 +111,9 @@ struct WorkQueueHandle {
 struct CompletionQueueHandle {
   void* cqAddr{nullptr};
   void* dbrRecAddr{nullptr};
-  uint32_t consIdx{0};      // numbers of cqe that have been completed
-  uint32_t needConsIdx{0};  // numbers of cqe that should be consumed
-  uint32_t activeIdx{0};    // numbers of cqe that under processing but not completed
+  uint32_t consIdx{0};      // numbers of cqe that have been completed 即quiet_completed
+  uint32_t needConsIdx{0};  // numbers of cqe that should be consumed 即quiet_posted
+  uint32_t activeIdx{0};    // numbers of cqe that under processing but not completed 即quiet_active
   uint32_t cq_consumer{0};
   uint32_t cqeNum{0};
   uint32_t cqeSize{0};

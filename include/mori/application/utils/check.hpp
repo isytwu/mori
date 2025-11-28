@@ -68,4 +68,11 @@ namespace application {
   } while (0)
 
 }  // namespace application
+
+inline hipError_t HipMallocWithLog(void** ptr, size_t size, const char* file = __FILE__,
+                                   int line = __LINE__) {
+  printf("[hipMalloc] %s:%d size=%zu bytes\n", file, line, size);
+  return hipMalloc(ptr, size);
+}
+
 }  // namespace mori

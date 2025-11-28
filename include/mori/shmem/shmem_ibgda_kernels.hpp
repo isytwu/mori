@@ -41,7 +41,7 @@ inline __device__ void ShmemQuietThreadKernelImpl(int pe) {
       uint32_t active =
           __hip_atomic_load(&cq.activeIdx, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
       uint32_t posted =
-          __hip_atomic_load(&cq.needConsIdx, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+          __hip_atomic_load(&cq.needConsIdx, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);//这里出现hang，quiet_posted
       uint32_t completed =
           __hip_atomic_load(&cq.consIdx, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
       if (!(posted - completed)) {
@@ -72,7 +72,7 @@ inline __device__ void ShmemQuietThreadKernelImpl(int pe) {
       uint16_t wqe_counter;
       if (prvdType == core::ProviderType::MLX5) {
         int opcode = core::PollCq<core::ProviderType::MLX5>(cq.cqAddr, cq.cqeNum, &my_cq_consumer,
-                                                            &wqe_counter);
+                                                            &wqe_counter);  // my_cq_consumer比较大？
         __threadfence_system();
         if (opcode == MLX5_CQE_RESP_ERR || opcode == MLX5_CQE_REQ_ERR) {
           printf("rank %d dest pe %d consIdx %d opcode %d\n", rank, pe, my_cq_index, opcode);
@@ -172,7 +172,7 @@ inline __device__ void ShmemPutMemNbiThreadKernelImpl(const application::SymmMem
     if (num_free_entries > num_entries_until_warp_last_entry) {
       break;
     }
-    ShmemQuietThreadKernelImpl(pe);
+    ShmemQuietThreadKernelImpl(pe);//不够了才quiet
   }
   wq.outstandingWqe[my_sq_counter % OUTSTANDING_TABLE_SIZE] = my_sq_counter;
   uint64_t dbr_val =
@@ -285,7 +285,7 @@ inline __device__ void ShmemPutSizeImmNbiThreadKernelImpl(const application::Sym
   wq.outstandingWqe[my_sq_counter % OUTSTANDING_TABLE_SIZE] = my_sq_counter;
 
   uint64_t dbr_val = core::PostWriteInline<PrvdType>(wq.sqAddr, wq.sqWqeNum, nullptr, my_sq_counter,
-                                                     ep[pe].handle.qpn, val, raddr, rkey, bytes);
+                                                     ep[pe].handle.qpn, val, raddr, rkey, bytes);//不是imm，怎么又inline
 
   if (is_leader) {
     uint64_t db_touched{0};
