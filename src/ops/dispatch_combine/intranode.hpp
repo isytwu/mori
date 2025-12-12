@@ -43,7 +43,10 @@ inline __device__ void CrossDeviceBarrierIntraNodeKernel(EpDispatchCombineArgs<T
   int warpNum = blockDim.x / warpSize;
   int globalWarpNum = gridDim.x * warpNum;
 
-  if (laneId == 0) atomicAdd(args.combineGridBarrier, 1);
+  if (laneId == 0) {
+    // __threadfence_system();
+    atomicAdd(args.combineGridBarrier, 1);
+  }
 
   if (globalThdId < args.config.worldSize) {
     // Set remote flag after all copies are done
@@ -147,6 +150,9 @@ __global__ void EpDispatchIntraNodeKernel(EpDispatchCombineArgs<T> args) {
       index_t destTokOffset = destTokId * config.hiddenDim;
       core::WarpCopy(args.shmemDispatchOutTokMemObj->template GetAs<T*>(destPe) + destTokOffset,
                      args.inpTokenBuf + srcTokOffset, config.hiddenDim);
+      // if (laneId == 0) {
+      //   printf("dispatch rank %d put to destPe %d destTokId %d %f\n", myPe, destPe, destTokId, *(float*)(args.shmemDispatchOutTokMemObj->template GetAs<T*>(destPe) + destTokOffset));
+      // }
     }
   }
   if (laneId == 0) atomicAdd(args.dispatchGridBarrier, 1);
@@ -211,21 +217,43 @@ __global__ void EpCombineIntraNodeKernel(EpDispatchCombineArgs<T> args) {
 
   const uint64_t crossDeviceBarrierFlag = args.crossDeviceBarrierFlag[0];
   size_t maxNumTokensToSend = config.MaxNumTokensToSend();
+  size_t MaxNumTokensToRecvPerRank = config.MaxNumTokensToRecvPerRank();
   // Copy input to shmem registered buffer so that other GPUs can access directly
   index_t totalRecvTokenNum = args.totalRecvTokenNum[0];
-  if (args.config.useExternalInpBuffer) {
-    for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) {
-      core::WarpCopy(args.shmemCombineInpTokMemObj->template GetAs<T*>() + i * config.hiddenDim,
-                     args.inpTokenBuf + i * config.hiddenDim, config.hiddenDim);
-    }
-  }
+  // if (args.config.useExternalInpBuffer) {
+  //   for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) { 
+  //     core::WarpCopy(args.shmemCombineInpTokMemObj->template GetAs<T*>() + i * config.hiddenDim,
+  //                    args.inpTokenBuf + i * config.hiddenDim, config.hiddenDim);
+  //   }
+  // }
 
-  if (args.weightsBuf) {
-    for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) {
+  // if (args.weightsBuf) {
+  //   for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) {
+  //     core::WarpCopy(
+  //         args.shmemInpWeightsMemObj->template GetAs<float*>() + i * config.numExpertPerToken,
+  //         args.weightsBuf + i * config.numExpertPerToken, config.numExpertPerToken);
+  //   }
+  // }
+
+  const size_t hiddenBytes = config.hiddenDim * sizeof(T);
+  const size_t weightBytes = (args.weightsBuf == nullptr) ? config.numExpertPerToken * sizeof(float) : 0;
+  const size_t combXferBytes = hiddenBytes + weightBytes;
+  for (int tokenIdx = globalWarpId; tokenIdx < totalRecvTokenNum; tokenIdx += globalWarpNum) {
+    index_t destTokId = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe)[tokenIdx];
+    index_t destPe = destTokId / MaxNumTokensToRecvPerRank;
+    index_t destLocalTokId = destTokId - destPe * MaxNumTokensToRecvPerRank;
+    uint8_t* destStagingPtr = args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(destPe) +
+                              (myPe * MaxNumTokensToRecvPerRank + destLocalTokId) * combXferBytes;
+    core::WarpCopy(reinterpret_cast<T*>(destStagingPtr),
+                   args.inpTokenBuf + tokenIdx * config.hiddenDim, config.hiddenDim);
+    if (args.weightsBuf) {
       core::WarpCopy(
-          args.shmemInpWeightsMemObj->template GetAs<float*>() + i * config.numExpertPerToken,
-          args.weightsBuf + i * config.numExpertPerToken, config.numExpertPerToken);
+          reinterpret_cast<float*>(destStagingPtr + hiddenBytes),
+          args.weightsBuf + tokenIdx * config.numExpertPerToken, config.numExpertPerToken);
     }
+    // if (laneId == 0 && fabsf(*reinterpret_cast<float*>(destStagingPtr) - float(destPe + 1))> 1e-1f) {
+    //   printf("rank %d tokenIdx %d %f != %f input %f\n", myPe, tokenIdx, *reinterpret_cast<float*>(destStagingPtr), float(destPe + 1), *(float*)(args.inpTokenBuf + tokenIdx * config.hiddenDim));
+    // }
   }
 
   // Make sure copy on all GPUs are finished
@@ -255,11 +283,16 @@ __global__ void EpCombineIntraNodeKernel(EpDispatchCombineArgs<T> args) {
       index_t destPe = destTokId / maxNumTokensToSend;
 
       if (destPe < config.worldSize) {
-        index_t destLocalTokId = destTokId - destPe * maxNumTokensToSend;
-        srcPtrs[j] = args.shmemCombineInpTokMemObj->template GetAs<T*>(destPe) +
-                     destLocalTokId * config.hiddenDim + hiddenDimOffset;
-        srcWeightsPtr[j] = args.shmemInpWeightsMemObj->template GetAs<float*>(destPe) +
-                           destLocalTokId * config.numExpertPerToken;
+        // index_t destLocalTokId = destTokId - destPe * maxNumTokensToSend;
+        // srcPtrs[j] = args.shmemCombineInpTokMemObj->template GetAs<T*>(destPe) +
+        //              destLocalTokId * config.hiddenDim + hiddenDimOffset;
+        srcPtrs[j] = reinterpret_cast<T*>(
+            args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(myPe) +
+            (destPe * MaxNumTokensToRecvPerRank + tokenId) * combXferBytes) + hiddenDimOffset;
+        srcWeightsPtr[j] = reinterpret_cast<float*>(
+            args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(myPe) +
+            (destPe * MaxNumTokensToRecvPerRank + tokenId) * combXferBytes +
+            hiddenBytes);
       } else {
         srcPtrs[j] = nullptr;
         srcWeightsPtr[j] = nullptr;

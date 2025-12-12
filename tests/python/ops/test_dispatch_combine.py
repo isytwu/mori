@@ -111,6 +111,15 @@ class EpDispatchCombineTestCase:
                     device=self.device,
                 ).to(self.config.data_type)
             )
+        # for r in range(self.config.world_size):
+        #     all_rank_input.append(
+        #         torch.full(
+        #             (num_token[r], self.config.hidden_dim),
+        #             fill_value=float(r + 1),
+        #             dtype=torch.float32,
+        #             device=self.device,
+        #         ).to(self.config.data_type)
+        #     )
 
         return (
             num_token,
@@ -179,15 +188,16 @@ class EpDispatchCombineTestCase:
             result_match = torch.allclose(
                 got.float(), expected.float(), atol=1e-2, rtol=1e-2
             )
-            if not result_match and self.config.rank == 0:
-                print(f"Result mismatch for token {i}:")
+            if not result_match:
+                print(f"rank {self.config.rank} Result mismatch for token {i}:")
                 print(
-                    f"  indices[{i}]: {all_rank_indices[self.config.rank][i].cpu().tolist()}"
+                    f"  rank {self.config.rank} indices[{i}]: {all_rank_indices[self.config.rank][i].cpu().tolist()}"
                 )
-                print(f"  pes: {pes}")
-                print(f"  unique_pes: {unique_pes}")
-                print(f"  got: {got}")
-                print(f"  expected : {expected}")
+                print(f"  rank {self.config.rank} pes: {pes}")
+                print(f"  rank {self.config.rank} unique_pes: {unique_pes}")
+                print(f"  rank {self.config.rank} got: {got}")
+                print(f"  rank {self.config.rank} expected : {expected}")
+                print(f"  rank {self.config.rank} input : {all_rank_input[self.config.rank][i].to(torch.float32)}")
 
             if combine_output_weight is not None:
                 got_weight, expected_weight = (

@@ -478,9 +478,11 @@ __forceinline__ __device__ void WarpAccumImpl(T* __restrict__ dest, T* const* __
   const size_t laneOffset = laneId * vecSize;
 
   float scales[AccumNum];
+  const T* cached_srcs[AccumNum];
 #pragma unroll AccumNum
   for (int i = 0; i < AccumNum; ++i) {
     scales[i] = (srcScales == nullptr) ? 1.0f : srcScales[i];
+    cached_srcs[i] = srcs[i];
   }
 
   for (size_t iter = 0; iter < numIters; ++iter) {
@@ -489,12 +491,14 @@ __forceinline__ __device__ void WarpAccumImpl(T* __restrict__ dest, T* const* __
     DataType srcVals[AccumNum];
 #pragma unroll AccumNum
     for (int i = 0; i < AccumNum; ++i) {
-      if (srcs[i] != nullptr) srcVals[i] = load<VecBytes>(srcs[i] + offset + laneOffset);
+      // if (srcs[i] != nullptr) srcVals[i] = load<VecBytes>(srcs[i] + offset + laneOffset);
+      if (cached_srcs[i] != nullptr) srcVals[i] = load<VecBytes>(cached_srcs[i] + offset + laneOffset);
     }
 
 #pragma unroll AccumNum
     for (int i = 0; i < AccumNum; ++i) {
-      if (srcs[i] != nullptr) {
+      // if (srcs[i] != nullptr) {
+      if (cached_srcs[i] != nullptr) {
 #pragma unroll vecSize
         for (int j = 0; j < vecSize; ++j) {
           accumValFp32[j] += float(reinterpret_cast<const T*>(srcVals + i)[j]) * scales[i];

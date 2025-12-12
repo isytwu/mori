@@ -79,15 +79,16 @@ class EpDispatchCombineBenchmark(EpDispatchCombineTestCase):
 
         total_recv_num_token = dispatch_recv_num_token[0].item()
 
-        combine_input = op.get_registered_combine_input_buffer(self.config.data_type)
-        combine_input[:total_recv_num_token, :].copy_(
-            dispatch_output[:total_recv_num_token, :]
-        )
+        # combine_input = op.get_registered_combine_input_buffer(self.config.data_type)
+        # combine_input[:total_recv_num_token, :].copy_(
+        #     dispatch_output[:total_recv_num_token, :]
+        # )
 
         self.sync()
         start_event.record()
         combine_output, _ = op.combine(
-            combine_input,
+            # combine_input,
+            dispatch_output,
             # dispatch_weights,
             None,
             dispatch_indices,
