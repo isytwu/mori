@@ -52,6 +52,7 @@ namespace moe {
   int npes = config.worldSize;                                                                  \
   int myNode = myPe / config.gpuPerNode;                                                        \
   int nNodes = npes / config.gpuPerNode;                                                        \
+  int myLocalPe = myPe - myNode * config.gpuPerNode;                                            \
   int numExpertPerToken = config.numExpertPerToken;                                             \
   assert(numExpertPerToken < warpSize);                                                         \
   size_t hiddenBytes = config.hiddenDim * sizeof(T);                                            \
@@ -510,8 +511,10 @@ inline __device__ void CombineSync(EpDispatchCombineArgs<T>& args) {
     index_t destTokId = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe)[tokenId];
     index_t destPe = destTokId / config.maxNumInpTokenPerRank;
     index_t destLocalTokId = destTokId - destPe * config.maxNumInpTokenPerRank;
-    uint8_t* destStagingPtr = args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(destPe) +
-                              (myPe * config.MaxNumTokensToRecvPerRank() + destLocalTokId) * combXferBytes;
+    index_t destNode = destPe / config.gpuPerNode;
+    index_t destProxyPe = myNode * config.gpuPerNode + (destPe % config.gpuPerNode);
+    uint8_t* destStagingPtr = args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(destProxyPe) +
+                              ((destNode * config.gpuPerNode + myLocalPe) * config.MaxNumTokensToRecvPerRank() + destLocalTokId) * combXferBytes;
     core::WarpCopy(reinterpret_cast<T*>(destStagingPtr),
                    args.inpTokenBuf + tokenId * config.hiddenDim, config.hiddenDim);
     if (args.weightsBuf) {
@@ -638,20 +641,24 @@ inline __device__ void CombineInterNode(EpDispatchCombineArgs<T>& args) {
           index_t destPe = destTokId / config.MaxNumTokensToRecv();
           index_t destNode = destPe / config.gpuPerNode;
           if (destNode == myNode) {
-#if LL == 0
             index_t destLocalTokId = destTokId - destPe * config.MaxNumTokensToRecv();
+#if LL == 0
             srcPtrs[laneId] = args.shmemCombineInpTokMemObj->template GetAs<T*>(destPe) +
                               destLocalTokId * config.hiddenDim;
             srcWeightsPtr[laneId] = args.shmemInpWeightsMemObj->template GetAs<float*>(destPe) +
                                     destLocalTokId * config.numExpertPerToken;
 #else
-            index_t srcTokenId = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(destPe)[destTokId];
+            index_t srcTokenId = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(destPe)[destLocalTokId];
+            index_t srcPe = srcTokenId / config.maxNumInpTokenPerRank;
+            index_t srcLocalTokenId = srcTokenId - srcPe * config.maxNumInpTokenPerRank;
+            index_t srcNode = srcPe / config.gpuPerNode;
+            index_t destLocalPe = destPe - destNode * config.gpuPerNode;
             srcPtrs[laneId] = reinterpret_cast<T*>(
                 args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(myPe) +
-                (destPe * config.MaxNumTokensToRecvPerRank() + srcTokenId) * combXferBytes);
+                ((srcNode * config.gpuPerNode + destLocalPe) * config.MaxNumTokensToRecvPerRank() + srcLocalTokenId) * combXferBytes);
             srcWeightsPtr[laneId] = reinterpret_cast<float*>(
                 args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(myPe) +
-                (destPe * config.MaxNumTokensToRecvPerRank() + srcTokenId) * combXferBytes +
+                ((srcNode * config.gpuPerNode + destLocalPe) * config.MaxNumTokensToRecvPerRank() + srcLocalTokenId) * combXferBytes +
                 hiddenBytes);
 #endif
           }
