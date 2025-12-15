@@ -297,8 +297,8 @@ class EpDispatchCombineTestCase:
             all_rank_scales[self.rank],
             all_rank_indices[self.rank],
             block_num=self.config.block_num,
-            warp_per_block=16,
-            # warp_per_block=8,
+            # warp_per_block=16,
+            warp_per_block=8,
         )
         torch.cuda.synchronize()
 
@@ -466,8 +466,8 @@ class EpDispatchCombineTestCase:
                 all_rank_scales[self.rank],
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                warp_per_block=16,
-                # warp_per_block=8,
+                # warp_per_block=16,
+                warp_per_block=8,
             )
             _, _ = op.combine(
                 dispatch_output,
@@ -503,8 +503,8 @@ class EpDispatchCombineTestCase:
                 all_rank_scales[self.rank],
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                warp_per_block=16,
-                # warp_per_block=8,
+                # warp_per_block=16,
+                warp_per_block=8,
             )
             _, _ = op.combine(
                 dispatch_output,
@@ -547,8 +547,8 @@ class EpDispatchCombineTestCase:
                 all_rank_scales[self.rank],
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                warp_per_block=16,
-                # warp_per_block=8,
+                # warp_per_block=16,
+                warp_per_block=8,
             )
             torch.cuda.synchronize()
             total_recv_num_token = dispatch_recv_num_token[0].item()
@@ -585,8 +585,8 @@ class EpDispatchCombineTestCase:
                 all_rank_scales[self.rank],
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                warp_per_block=16,
-                # warp_per_block=8,
+                # warp_per_block=16,
+                warp_per_block=8,
             )
             events[2 * i + 1].record()
             combine_output, _ = op.combine(
