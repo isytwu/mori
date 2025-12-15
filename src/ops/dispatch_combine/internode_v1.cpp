@@ -26,6 +26,8 @@
 #include "mori/ops/dispatch_combine/dispatch_combine.hpp"
 #include "mori/shmem/shmem.hpp"
 
+#define LL 1
+
 namespace mori {
 namespace moe {
 
@@ -491,6 +493,7 @@ inline __device__ void CombineSync(EpDispatchCombineArgs<T>& args) {
   int tokenPerBlock = core::CeilDiv(totalRecvTokenNum, blockNum);
   int startTokenIdx = blockId * tokenPerBlock;
   int endTokenIdx = std::min(startTokenIdx + tokenPerBlock, totalRecvTokenNum);
+#if LL == 0
   for (int tokenId = startTokenIdx + warpId; tokenId < endTokenIdx; tokenId += warpNum) {
     core::WarpCopy(args.shmemCombineInpTokMemObj->template GetAs<T*>() + tokenId * config.hiddenDim,
                    args.inpTokenBuf + tokenId * config.hiddenDim, config.hiddenDim);
@@ -502,6 +505,22 @@ inline __device__ void CombineSync(EpDispatchCombineArgs<T>& args) {
           args.weightsBuf + tokenId * config.numExpertPerToken, config.numExpertPerToken);
     }
   }
+#else
+  for (int tokenId = startTokenIdx + warpId; tokenId < endTokenIdx; tokenId += warpNum) {
+    index_t destTokId = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe)[tokenId];
+    index_t destPe = destTokId / config.maxNumInpTokenPerRank;
+    index_t destLocalTokId = destTokId - destPe * config.maxNumInpTokenPerRank;
+    uint8_t* destStagingPtr = args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(destPe) +
+                              (myPe * config.MaxNumTokensToRecvPerRank() + destLocalTokId) * combXferBytes;
+    core::WarpCopy(reinterpret_cast<T*>(destStagingPtr),
+                   args.inpTokenBuf + tokenId * config.hiddenDim, config.hiddenDim);
+    if (args.weightsBuf) {
+      core::WarpCopy(
+          reinterpret_cast<float*>(destStagingPtr + hiddenBytes),
+          args.weightsBuf + tokenId * config.numExpertPerToken, config.numExpertPerToken);
+    }
+  }
+#endif
 
   // After all warps copy done, set barrier flag
   uint64_t barrierFlag = 0;
@@ -557,11 +576,21 @@ inline __device__ void CombineIntraNode(EpDispatchCombineArgs<T>& args) {
       index_t destPe = destTokId / config.MaxNumTokensToRecv();
       index_t destNode = destPe / config.gpuPerNode;
       if (destNode == myNode) {
+#if LL == 0
         index_t destLocalTokId = destTokId - destPe * config.MaxNumTokensToRecv();
         srcPtrs[laneId] = args.shmemCombineInpTokMemObj->template GetAs<T*>(destPe) +
                           destLocalTokId * config.hiddenDim;
         srcWeightsPtr[laneId] = args.shmemInpWeightsMemObj->template GetAs<float*>(destPe) +
                                 destLocalTokId * config.numExpertPerToken;
+#else
+        srcPtrs[laneId] = reinterpret_cast<T*>(
+            args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(myPe) +
+            (destPe * config.MaxNumTokensToRecvPerRank() + tokenId) * combXferBytes);
+        srcWeightsPtr[laneId] = reinterpret_cast<float*>(
+            args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(myPe) +
+            (destPe * config.MaxNumTokensToRecvPerRank() + tokenId) * combXferBytes +
+            hiddenBytes);
+#endif
       }
     }
     core::WarpAccum<T, 4>(reinterpret_cast<T*>(stagingPtr + tokenId * combXferBytes), srcPtrs,
@@ -609,11 +638,22 @@ inline __device__ void CombineInterNode(EpDispatchCombineArgs<T>& args) {
           index_t destPe = destTokId / config.MaxNumTokensToRecv();
           index_t destNode = destPe / config.gpuPerNode;
           if (destNode == myNode) {
+#if LL == 0
             index_t destLocalTokId = destTokId - destPe * config.MaxNumTokensToRecv();
             srcPtrs[laneId] = args.shmemCombineInpTokMemObj->template GetAs<T*>(destPe) +
                               destLocalTokId * config.hiddenDim;
             srcWeightsPtr[laneId] = args.shmemInpWeightsMemObj->template GetAs<float*>(destPe) +
                                     destLocalTokId * config.numExpertPerToken;
+#else
+            index_t srcTokenId = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(destPe)[destTokId];
+            srcPtrs[laneId] = reinterpret_cast<T*>(
+                args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(myPe) +
+                (destPe * config.MaxNumTokensToRecvPerRank() + srcTokenId) * combXferBytes);
+            srcWeightsPtr[laneId] = reinterpret_cast<float*>(
+                args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(myPe) +
+                (destPe * config.MaxNumTokensToRecvPerRank() + srcTokenId) * combXferBytes +
+                hiddenBytes);
+#endif
           }
           args.interNodeDispDestTokIdMap[tokIdx * config.numExpertPerToken + laneId] = 0;
         }

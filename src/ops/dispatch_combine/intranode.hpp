@@ -235,9 +235,12 @@ __global__ void EpCombineIntraNodeKernel(EpDispatchCombineArgs<T> args) {
   //   }
   // }
 
+  uint64_t time[10];
+
   const size_t hiddenBytes = config.hiddenDim * sizeof(T);
   const size_t weightBytes = (args.weightsBuf == nullptr) ? config.numExpertPerToken * sizeof(float) : 0;
   const size_t combXferBytes = hiddenBytes + weightBytes;
+  time[0] = wall_clock64();
   for (int tokenIdx = globalWarpId; tokenIdx < totalRecvTokenNum; tokenIdx += globalWarpNum) {
     index_t destTokId = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe)[tokenIdx];
     index_t destPe = destTokId / MaxNumTokensToRecvPerRank;
@@ -255,6 +258,7 @@ __global__ void EpCombineIntraNodeKernel(EpDispatchCombineArgs<T> args) {
     //   printf("rank %d tokenIdx %d %f != %f input %f\n", myPe, tokenIdx, *reinterpret_cast<float*>(destStagingPtr), float(destPe + 1), *(float*)(args.inpTokenBuf + tokenIdx * config.hiddenDim));
     // }
   }
+  time[1] = wall_clock64();
 
   // Make sure copy on all GPUs are finished
   CrossDeviceBarrierIntraNodeKernel(args, crossDeviceBarrierFlag);
@@ -270,6 +274,7 @@ __global__ void EpCombineIntraNodeKernel(EpDispatchCombineArgs<T> args) {
   index_t hiddenDimPerWarp = (config.hiddenDim + warpsPerToken - 1) / warpsPerToken;
 
   assert(config.numExpertPerToken < warpSize);
+  time[2] = wall_clock64();
   for (int i = globalWarpId; i < (args.curRankNumToken * warpsPerToken); i += globalWarpNum) {
     index_t tokenId = i / warpsPerToken;
     index_t inTokenPartId = i % warpsPerToken;
@@ -308,6 +313,13 @@ __global__ void EpCombineIntraNodeKernel(EpDispatchCombineArgs<T> args) {
                                 srcWeightsPtr, nullptr, config.numExpertPerToken,
                                 config.numExpertPerToken);
     }
+  }
+  time[3] = wall_clock64();
+  if (globalThdId == 0 && blockIdx.x == 0 && myPe == 0) {
+    for(int i=0; i<4; ++i) {
+    printf("time[%d] = %f ", (time[i] - time[0]) / 100.0f);
+    }
+    printf("\n");
   }
 }
 
