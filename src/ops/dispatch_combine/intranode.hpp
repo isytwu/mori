@@ -25,6 +25,8 @@
 #include "mori/ops/dispatch_combine/dispatch_combine.hpp"
 #include "mori/shmem/shmem.hpp"
 
+#define PROFILING 1
+
 namespace mori {
 namespace moe {
 
@@ -51,6 +53,7 @@ inline __device__ void CrossDeviceBarrierIntraNodeKernel(EpDispatchCombineArgs<T
   if (globalThdId < args.config.worldSize) {
     // Set remote flag after all copies are done
     shmem::ShmemUint32WaitUntilEquals(args.combineGridBarrier, globalWarpNum);
+    // if(globalThdId == 0) __threadfence_system();
     args.combineGridBarrier[0] = 0;
     core::AtomicStoreRelaxedSystem(
         args.crossDeviceBarrierMemObj->template GetAs<uint64_t*>(globalThdId) + args.config.rank,
@@ -241,6 +244,9 @@ __global__ void EpCombineIntraNodeKernel(EpDispatchCombineArgs<T> args) {
   const size_t weightBytes = (args.weightsBuf == nullptr) ? config.numExpertPerToken * sizeof(float) : 0;
   const size_t combXferBytes = hiddenBytes + weightBytes;
   time[0] = wall_clock64();
+  // if (globalThdId == 0 && blockIdx.x == 0 && myPe == 0) {
+  //   printf("totalRecvTokenNum %d globalWarpNum %d\n", totalRecvTokenNum, globalWarpNum);
+  // }
   for (int tokenIdx = globalWarpId; tokenIdx < totalRecvTokenNum; tokenIdx += globalWarpNum) {
     index_t destTokId = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe)[tokenIdx];
     index_t destPe = destTokId / MaxNumTokensToRecvPerRank;
@@ -315,12 +321,14 @@ __global__ void EpCombineIntraNodeKernel(EpDispatchCombineArgs<T> args) {
     }
   }
   time[3] = wall_clock64();
-  if (globalThdId == 0 && blockIdx.x == 0 && myPe == 0) {
+#if PROFILING == 1
+  if (thdId == 0 && myPe == 0) {
     for(int i=0; i<4; ++i) {
-    printf("time[%d] = %f ", (time[i] - time[0]) / 100.0f);
+    printf("block %d time[%d] = %f ", blockIdx.x, i, (time[i] - time[0]) / 100.0f);
     }
     printf("\n");
   }
+#endif
 }
 
 }  // namespace moe
