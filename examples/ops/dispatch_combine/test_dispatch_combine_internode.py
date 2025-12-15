@@ -60,12 +60,15 @@ class EpDispatchCombineTestCase:
             max_num_inp_token_per_rank=max_tokens,
             num_experts_per_rank=16,
             num_experts_per_token=8,
-            warp_num_per_block=8,
-            block_num=64,
+            # warp_num_per_block=8,
+            # block_num=64,
+            warp_num_per_block=16,
+            block_num=32,
             max_token_type_size=2,
             kernel_type=kernel_type_map[kernel_type],
             gpu_per_node=self.gpu_per_node,
-            rdma_block_num=32,
+            # rdma_block_num=32,
+            rdma_block_num=16,
             num_qp_per_pe=num_qp,
         )
 
@@ -294,7 +297,8 @@ class EpDispatchCombineTestCase:
             all_rank_scales[self.rank],
             all_rank_indices[self.rank],
             block_num=self.config.block_num,
-            # warp_per_block=16,
+            warp_per_block=16,
+            # warp_per_block=8,
         )
         torch.cuda.synchronize()
 
@@ -343,7 +347,7 @@ class EpDispatchCombineTestCase:
             dispatch_weights,
             all_rank_indices[self.rank],
             block_num=self.config.block_num,
-            # warp_per_block=16,
+            warp_per_block=16,
         )
         torch.cuda.synchronize()
         for i in range(all_rank_num_token[self.rank]):
@@ -378,6 +382,7 @@ class EpDispatchCombineTestCase:
                     got,
                     f"{self.rank} expected: ",
                     expected,
+                    f"{self.rank} input: ",
                     all_rank_input[self.rank][i],
                 )
                 # delta = got.float() - expected.float()
@@ -461,14 +466,15 @@ class EpDispatchCombineTestCase:
                 all_rank_scales[self.rank],
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                # warp_per_block=16,
+                warp_per_block=16,
+                # warp_per_block=8,
             )
             _, _ = op.combine(
                 dispatch_output,
                 dispatch_weights,
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                # warp_per_block=16,
+                warp_per_block=16,
             )
             torch.cuda.synchronize()
             time.sleep(0.0001)
@@ -497,14 +503,15 @@ class EpDispatchCombineTestCase:
                 all_rank_scales[self.rank],
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                # warp_per_block=16,
+                warp_per_block=16,
+                # warp_per_block=8,
             )
             _, _ = op.combine(
                 dispatch_output,
                 dispatch_weights,
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                # warp_per_block=16,
+                warp_per_block=16,
             )
         torch.cuda.synchronize()
 
@@ -540,7 +547,8 @@ class EpDispatchCombineTestCase:
                 all_rank_scales[self.rank],
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                # warp_per_block=16,
+                warp_per_block=16,
+                # warp_per_block=8,
             )
             torch.cuda.synchronize()
             total_recv_num_token = dispatch_recv_num_token[0].item()
@@ -550,7 +558,7 @@ class EpDispatchCombineTestCase:
                 # None,
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                # warp_per_block=16,
+                warp_per_block=16,
             )
             torch.cuda.synchronize()
 
@@ -577,7 +585,8 @@ class EpDispatchCombineTestCase:
                 all_rank_scales[self.rank],
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                # warp_per_block=16,
+                warp_per_block=16,
+                # warp_per_block=8,
             )
             events[2 * i + 1].record()
             combine_output, _ = op.combine(
@@ -585,7 +594,7 @@ class EpDispatchCombineTestCase:
                 dispatch_weights,
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                # warp_per_block=16,
+                warp_per_block=16,
             )
             events[2 * i + 2].record()
         torch.cuda.synchronize()
