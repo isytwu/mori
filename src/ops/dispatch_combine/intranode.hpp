@@ -25,7 +25,7 @@
 #include "mori/ops/dispatch_combine/dispatch_combine.hpp"
 #include "mori/shmem/shmem.hpp"
 
-#define PROFILING 1
+#define PROFILING 0
 
 namespace mori {
 namespace moe {
