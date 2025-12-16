@@ -515,7 +515,7 @@ class EpDispatchCombineTestCase:
 
         del op
 
-    def run_bench_once(self, op, test_data, repeat=10):
+    def run_bench_once(self, op, test_data, dispatch_warp_num, combine_warp_num, repeat=10):
         num_events = 2 * repeat + 1
         events = [torch.cuda.Event(enable_timing=True) for i in range(num_events)]
 
@@ -540,7 +540,7 @@ class EpDispatchCombineTestCase:
                 all_rank_scales[self.rank],
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                # warp_per_block=16,
+                warp_per_block=dispatch_warp_num,
             )
             torch.cuda.synchronize()
             total_recv_num_token = dispatch_recv_num_token[0].item()
@@ -550,7 +550,7 @@ class EpDispatchCombineTestCase:
                 # None,
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                # warp_per_block=16,
+                warp_per_block=combine_warp_num,
             )
             torch.cuda.synchronize()
 
@@ -577,7 +577,7 @@ class EpDispatchCombineTestCase:
                 all_rank_scales[self.rank],
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                # warp_per_block=16,
+                warp_per_block=dispatch_warp_num,
             )
             events[2 * i + 1].record()
             combine_output, _ = op.combine(
@@ -585,7 +585,7 @@ class EpDispatchCombineTestCase:
                 dispatch_weights,
                 all_rank_indices[self.rank],
                 block_num=self.config.block_num,
-                # warp_per_block=16,
+                warp_per_block=combine_warp_num,
             )
             events[2 * i + 2].record()
         torch.cuda.synchronize()
@@ -630,7 +630,7 @@ class EpDispatchCombineTestCase:
             ll_mode_scale,
         )
 
-    def bench_dispatch_combine(self):
+    def bench_dispatch_combine(self, dispatch_warp_num=8, combine_warp_num=8):
         op = mori.ops.EpDispatchCombineOp(self.config)
         test_data = self.gen_test_data(use_max_token_num=True)
 
@@ -659,7 +659,7 @@ class EpDispatchCombineTestCase:
             comb_rdma_bandwidth,
             comb_bandwidth,
             ll_mode_scale,
-        ) = self.run_bench_once(op, test_data, repeat)
+        ) = self.run_bench_once(op, test_data, dispatch_warp_num, combine_warp_num, repeat)
 
         for i in range(repeat):
             disp_duration_output = [torch.zeros(1) for _ in range(self.world_size)]
@@ -838,7 +838,14 @@ def test_dispatch_combine(
     if cmd == "test":
         test_case.test_dispatch_combine()
     elif cmd == "bench":
-        test_case.bench_dispatch_combine()
+        # Test different warp configurations
+        warp_configs = [(8, combine_warps) for combine_warps in range(4, 16)]
+        for dispatch_warps, combine_warps in warp_configs:
+            if test_case.rank == 0:
+                print(f"\n{'='*60}")
+                print(f"Testing with dispatch_warps={dispatch_warps}, combine_warps={combine_warps}")
+                print(f"{'='*60}\n")
+            test_case.bench_dispatch_combine(dispatch_warps, combine_warps)
     elif cmd == "stress":
         test_case.stress_dispatch_combine()
     else:
