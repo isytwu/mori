@@ -839,7 +839,7 @@ def test_dispatch_combine(
         test_case.test_dispatch_combine()
     elif cmd == "bench":
         # Test different warp configurations
-        warp_configs = [(8, combine_warps) for combine_warps in range(4, 16)]
+        warp_configs = [(8, combine_warps) for combine_warps in range(4, 12)]
         for dispatch_warps, combine_warps in warp_configs:
             if test_case.rank == 0:
                 print(f"\n{'='*60}")
