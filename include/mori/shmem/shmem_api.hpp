@@ -91,5 +91,16 @@ application::SymmMemObjPtr ShmemQueryMemObjPtr(void*);
 int ShmemBufferRegister(void* ptr, size_t size);
 int ShmemBufferDeregister(void* ptr, size_t size);
 
+/* ---------------------------------------------------------------------------------------------- */
+/*                                      Performance Profiling                                     */
+/* ---------------------------------------------------------------------------------------------- */
+
+// Get timing data buffer pointer (10 uint64_t values)
+// Returns nullptr if timing is not enabled
+uint64_t* ShmemGetTimingBufferPtr();
+
+// Read and print timing data from device
+void ShmemPrintTimingData();
+
 }  // namespace shmem
 }  // namespace mori

@@ -181,6 +181,12 @@ void GpuStateInit() {
       reinterpret_cast<uintptr_t>(gpuStates.internalSyncPtr),
       reinterpret_cast<uintptr_t>(gpuStates.heapObj));
 
+                  // Allocate timing buffer for performance profiling (10 uint64_t for single warp)
+  HIP_RUNTIME_CHECK(hipMalloc(&gpuStates.timingBuffer, 10 * sizeof(uint64_t)));
+  HIP_RUNTIME_CHECK(hipMemset(gpuStates.timingBuffer, 0, 10 * sizeof(uint64_t)));
+  MORI_SHMEM_INFO("Timing buffer allocated at 0x{:x}", 
+                  reinterpret_cast<uintptr_t>(gpuStates.timingBuffer));
+
   // Copy gpu states to constant memory
   HIP_RUNTIME_CHECK(
       hipMemcpyToSymbol(globalGpuStates, &gpuStates, sizeof(GpuStates), 0, hipMemcpyHostToDevice));
@@ -217,6 +223,11 @@ int ShmemFinalize() {
 
   if (globalGpuStates.internalSyncPtr != nullptr) {
     states->memoryStates->symmMemMgr->HeapDeregisterSymmMemObj(globalGpuStates.internalSyncPtr);
+  }
+
+  // Free timing buffer
+  if (globalGpuStates.timingBuffer != nullptr) {
+    HIP_RUNTIME_CHECK(hipFree(globalGpuStates.timingBuffer));
   }
 
   // Free the static symmetric heap through SymmMemManager
@@ -390,6 +401,52 @@ int ShmemInitAttr(unsigned int flags, mori_shmem_init_attr_t* attr) {
   }
 
   return -1;
+}
+
+/* ---------------------------------------------------------------------------------------------- */
+/*                                      Performance Profiling                                     */
+/* ---------------------------------------------------------------------------------------------- */
+
+uint64_t* ShmemGetTimingBufferPtr() {
+  ShmemStates* states = ShmemStatesSingleton::GetInstance();
+  if (states->status != ShmemStatesStatus::Initialized) {
+    MORI_SHMEM_WARN("ShmemGetTimingBufferPtr called but SHMEM not initialized");
+    return nullptr;
+  }
+
+  // Get the device pointer from constant memory
+  GpuStates hostGpuStates;
+  HIP_RUNTIME_CHECK(
+      hipMemcpyFromSymbol(&hostGpuStates, globalGpuStates, sizeof(GpuStates), 0, hipMemcpyDeviceToHost));
+  
+  return hostGpuStates.timingBuffer;
+}
+
+void ShmemPrintTimingData() {
+  uint64_t* deviceTimingBuffer = ShmemGetTimingBufferPtr();
+  if (deviceTimingBuffer == nullptr) {
+    MORI_SHMEM_INFO("Timing buffer not available");
+    return;
+  }
+
+  // Copy timing data from device to host
+  uint64_t hostTiming[10];
+  HIP_RUNTIME_CHECK(
+      hipMemcpy(hostTiming, deviceTimingBuffer, 10 * sizeof(uint64_t), hipMemcpyDeviceToHost));
+
+  ShmemStates* states = ShmemStatesSingleton::GetInstance();
+  int rank = states->bootStates->rank;
+
+  // MORI_SHMEM_INFO("[rank={}] Timing data:", rank);
+  // for (int i = 1; i < 9; ++i) {
+  //   double time_us = (hostTiming[i] - hostTiming[0]) / 100.0;
+  //   MORI_SHMEM_INFO("  time[{}] = {:.3f} us", i, time_us);
+  // }
+  printf("[rank=%d] Timing data:\n", rank);
+  for (int i = 0; i < 9; ++i) {
+    double time_us = (hostTiming[i] - hostTiming[0]) / 100.0;
+    printf("  time[%d] = %.3f us stamp=%lu\n", i, time_us, hostTiming[i]);
+  }
 }
 
 }  // namespace shmem
