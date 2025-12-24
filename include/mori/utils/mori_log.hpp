@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cctype>
+#include <unistd.h>  // for getpid()
 
 #include "spdlog/spdlog.h"
 #include "spdlog/sinks/stdout_color_sinks.h"
@@ -78,9 +79,32 @@ class ModuleLogger {
       // Use existing logger
       logger = existing_logger;
     } else {
-      // Create new logger
-      logger = spdlog::stdout_color_mt(moduleName);
-      logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v");
+      // Check if we should log to file (useful for profile logs per rank/process)
+      const char* logToFileEnv = std::getenv("MORI_LOG_TO_FILE");
+      const char* logFilePatternEnv = std::getenv("MORI_LOG_FILE_PATTERN");
+      
+      if (logToFileEnv && std::string(logToFileEnv) == "1") {
+        // Create file logger with rank/pid in filename
+        std::string filename;
+        if (logFilePatternEnv) {
+          filename = logFilePatternEnv;
+        } else {
+          // Default pattern: mori_<module>_<pid>.log
+          filename = "mori_" + moduleName + "_" + std::to_string(getpid()) + ".log";
+        }
+        logger = spdlog::basic_logger_mt(moduleName, filename);
+      } else {
+        // Create console logger
+        logger = spdlog::stdout_color_mt(moduleName);
+      }
+      
+      // Set pattern - check if we should include PID in log lines
+      const char* showPidEnv = std::getenv("MORI_LOG_SHOW_PID");
+      if (showPidEnv && std::string(showPidEnv) == "1") {
+        logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [PID:%P] [%n] [%^%l%$] %v");
+      } else {
+        logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v");
+      }
     }
     
     // Determine the log level priority: env var > global setting > provided level
@@ -233,6 +257,7 @@ constexpr const char* IO = "io";
 constexpr const char* SHMEM = "shmem";
 constexpr const char* CORE = "core";
 constexpr const char* OPS = "ops";
+constexpr const char* PROFILE = "profile";
 } // namespace modules
 
 // Macro helpers
@@ -283,6 +308,13 @@ constexpr const char* OPS = "ops";
 #define MORI_OPS_WARN(...) MORI_WARN(mori::modules::OPS, __VA_ARGS__)
 #define MORI_OPS_ERROR(...) MORI_ERROR(mori::modules::OPS, __VA_ARGS__)
 #define MORI_OPS_CRITICAL(...) MORI_CRITICAL(mori::modules::OPS, __VA_ARGS__)
+
+#define MORI_PROFILE_TRACE(...) MORI_TRACE(mori::modules::PROFILE, __VA_ARGS__)
+#define MORI_PROFILE_DEBUG(...) MORI_DEBUG(mori::modules::PROFILE, __VA_ARGS__)
+#define MORI_PROFILE_INFO(...) MORI_INFO(mori::modules::PROFILE, __VA_ARGS__)
+#define MORI_PROFILE_WARN(...) MORI_WARN(mori::modules::PROFILE, __VA_ARGS__)
+#define MORI_PROFILE_ERROR(...) MORI_ERROR(mori::modules::PROFILE, __VA_ARGS__)
+#define MORI_PROFILE_CRITICAL(...) MORI_CRITICAL(mori::modules::PROFILE, __VA_ARGS__)
 
 // Scoped Timer class
 class ScopedTimer {

@@ -181,11 +181,18 @@ void GpuStateInit() {
       reinterpret_cast<uintptr_t>(gpuStates.internalSyncPtr),
       reinterpret_cast<uintptr_t>(gpuStates.heapObj));
 
-                  // Allocate timing buffer for performance profiling (10 uint64_t for single warp)
-  HIP_RUNTIME_CHECK(hipMalloc(&gpuStates.timingBuffer, 10 * sizeof(uint64_t)));
-  HIP_RUNTIME_CHECK(hipMemset(gpuStates.timingBuffer, 0, 10 * sizeof(uint64_t)));
-  MORI_SHMEM_INFO("Timing buffer allocated at 0x{:x}", 
-                  reinterpret_cast<uintptr_t>(gpuStates.timingBuffer));
+  // Allocate timing buffer for performance profiling
+  // 80 blocks * 16 warps per block * 16 entries per warp = 20480 uint64_t
+  // Each warp entry: [10 timestamps, rank, dest, source, bytes, pe, qpId]
+  constexpr size_t NUM_BLOCKS = 80;
+  constexpr size_t NUM_WARPS_PER_BLOCK = 16;
+  constexpr size_t ENTRIES_PER_WARP = 16;  // 10 timestamps + 6 parameters
+  constexpr size_t TIMING_BUFFER_SIZE = NUM_BLOCKS * NUM_WARPS_PER_BLOCK * ENTRIES_PER_WARP;
+  HIP_RUNTIME_CHECK(hipMalloc(&gpuStates.timingBuffer, TIMING_BUFFER_SIZE * sizeof(uint64_t)));
+  HIP_RUNTIME_CHECK(hipMemset(gpuStates.timingBuffer, 0, TIMING_BUFFER_SIZE * sizeof(uint64_t)));
+  MORI_SHMEM_INFO("Timing buffer allocated at 0x{:x}, size: {} entries ({} MB)",
+                  reinterpret_cast<uintptr_t>(gpuStates.timingBuffer), TIMING_BUFFER_SIZE,
+                  (TIMING_BUFFER_SIZE * sizeof(uint64_t)) / (1024 * 1024));
 
   // Copy gpu states to constant memory
   HIP_RUNTIME_CHECK(
@@ -416,9 +423,9 @@ uint64_t* ShmemGetTimingBufferPtr() {
 
   // Get the device pointer from constant memory
   GpuStates hostGpuStates;
-  HIP_RUNTIME_CHECK(
-      hipMemcpyFromSymbol(&hostGpuStates, globalGpuStates, sizeof(GpuStates), 0, hipMemcpyDeviceToHost));
-  
+  HIP_RUNTIME_CHECK(hipMemcpyFromSymbol(&hostGpuStates, globalGpuStates, sizeof(GpuStates), 0,
+                                        hipMemcpyDeviceToHost));
+
   return hostGpuStates.timingBuffer;
 }
 
@@ -429,24 +436,80 @@ void ShmemPrintTimingData() {
     return;
   }
 
-  // Copy timing data from device to host
-  uint64_t hostTiming[10];
-  HIP_RUNTIME_CHECK(
-      hipMemcpy(hostTiming, deviceTimingBuffer, 10 * sizeof(uint64_t), hipMemcpyDeviceToHost));
-
   ShmemStates* states = ShmemStatesSingleton::GetInstance();
   int rank = states->bootStates->rank;
 
-  // MORI_SHMEM_INFO("[rank={}] Timing data:", rank);
-  // for (int i = 1; i < 9; ++i) {
-  //   double time_us = (hostTiming[i] - hostTiming[0]) / 100.0;
-  //   MORI_SHMEM_INFO("  time[{}] = {:.3f} us", i, time_us);
-  // }
-  printf("[rank=%d] Timing data:\n", rank);
-  for (int i = 0; i < 9; ++i) {
-    double time_us = (hostTiming[i] - hostTiming[0]) / 100.0;
-    printf("  time[%d] = %.3f us stamp=%lu\n", i, time_us, hostTiming[i]);
+  // Timing buffer structure: 80 blocks * 16 warps * 16 entries
+  // Each warp entry: [10 timestamps, rank, dest, source, bytes, pe, qpId]
+  constexpr size_t NUM_BLOCKS = 80;
+  constexpr size_t NUM_WARPS_PER_BLOCK = 16;
+  constexpr size_t ENTRIES_PER_WARP = 16;
+  constexpr size_t NUM_TIMESTAMPS = 10;
+  constexpr size_t TIMING_BUFFER_SIZE = NUM_BLOCKS * NUM_WARPS_PER_BLOCK * ENTRIES_PER_WARP;
+
+  // Allocate host buffer
+  std::vector<uint64_t> hostTiming(TIMING_BUFFER_SIZE);
+
+  // Copy timing data from device to host
+  HIP_RUNTIME_CHECK(hipMemcpy(hostTiming.data(), deviceTimingBuffer,
+                              TIMING_BUFFER_SIZE * sizeof(uint64_t), hipMemcpyDeviceToHost));
+
+  // printf("[rank=%d] Timing data (80 blocks, 16 warps per block):\n", rank);
+
+  // Print timing data for each block and warp
+  MORI_PROFILE_INFO("========== Timing data (rank={}, 80 blocks, 16 warps per block) ==========",
+                    rank);
+  for (size_t block_id = 0; block_id < NUM_BLOCKS; ++block_id) {
+    for (size_t warp_id = 0; warp_id < NUM_WARPS_PER_BLOCK; ++warp_id) {
+      size_t base_offset = (block_id * NUM_WARPS_PER_BLOCK + warp_id) * ENTRIES_PER_WARP;
+      uint64_t t0 = hostTiming[base_offset];
+
+      // Skip if this warp has no timing data (timestamp 0 is still 0)
+      if (t0 == 0) continue;
+
+      // Extract parameters (positions 10-15)
+      uint64_t recorded_rank = hostTiming[base_offset + 10];
+      uint64_t dest_ptr = hostTiming[base_offset + 11];
+      uint64_t source_ptr = hostTiming[base_offset + 12];
+      uint64_t bytes = hostTiming[base_offset + 13];
+      uint64_t pe = hostTiming[base_offset + 14];
+      uint64_t qpId = hostTiming[base_offset + 15];
+
+#if 0
+      printf(
+          "  [Block %2zu, Warp %2zu] rank=%lu, pe=%lu, qpId=%lu, bytes=%lu, dest=0x%lx, "
+          "source=0x%lx\n",
+          block_id, warp_id, recorded_rank, pe, qpId, bytes, dest_ptr, source_ptr);
+      printf("    Timestamps: ");
+
+      for (size_t i = 0; i < NUM_TIMESTAMPS; ++i) {
+        uint64_t timestamp = hostTiming[base_offset + i];
+        if (timestamp == 0) break;  // Stop if no more valid timestamps
+
+        double time_us = (timestamp - t0) / 100.0;
+        printf("t[%zu]=%.2f ", i, time_us);
+      }
+      printf("us\n");
+#else
+      MORI_PROFILE_INFO(
+          "[Block {:2d}, Warp {:2d}] rank={}, pe={}, qpId={}, bytes={}, dest=0x{:x}, source=0x{:x}",
+          block_id, warp_id, recorded_rank, pe, qpId, bytes, dest_ptr, source_ptr);
+
+      // Build timestamp string
+      std::string timestamp_str = "  Timestamps: ";
+      for (size_t i = 0; i < NUM_TIMESTAMPS; ++i) {
+        uint64_t timestamp = hostTiming[base_offset + i];
+        if (timestamp == 0) break;  // Stop if no more valid timestamps
+
+        double time_us = (timestamp - t0) / 100.0;
+        timestamp_str += fmt::format("t[{}]={:.2f} ", i, time_us);
+      }
+      timestamp_str += "us";
+      MORI_PROFILE_INFO(timestamp_str);
+#endif
+    }
   }
+  MORI_PROFILE_INFO("========== End of timing data ==========");
 }
 
 }  // namespace shmem

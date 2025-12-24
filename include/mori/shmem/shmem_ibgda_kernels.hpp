@@ -26,8 +26,8 @@
 
 #include "mori/application/application.hpp"
 #include "mori/core/core.hpp"
-#include "mori/shmem/shmem_api.hpp"
 #include "mori/shmem/internal.hpp"
+#include "mori/shmem/shmem_api.hpp"
 
 namespace mori {
 namespace shmem {
@@ -387,8 +387,8 @@ inline __device__ void ShmemPutMemNbiThreadKernelImpl(const application::SymmMem
   }
   // __threadfence_system();
   // if (is_leader) {
-  //   printf("[rank=%d][block=%d][warp=%d][thread=%d][qpId=%d] ", globalGpuStates->rank, blockIdx.x, threadIdx.x/64, threadIdx.x, qpId);
-  //   for(int i=0; i < 8; ++i) {
+  //   printf("[rank=%d][block=%d][warp=%d][thread=%d][qpId=%d] ", globalGpuStates->rank,
+  //   blockIdx.x, threadIdx.x/64, threadIdx.x, qpId); for(int i=0; i < 8; ++i) {
   //     printf("time[%d]=%.3f ", i, (d_time[i] - d_time[0]) / 100.0f);
   //   }
   //   printf("\n");
@@ -1126,8 +1126,34 @@ DEFINE_SHMEM_ATOMIC_TYPE_FETCH_WARP_KERNEL(Uint64, uint64_t)
 DEFINE_SHMEM_ATOMIC_TYPE_FETCH_WARP_KERNEL(Int32, int32_t)
 DEFINE_SHMEM_ATOMIC_TYPE_FETCH_WARP_KERNEL(Int64, int64_t)
 
-#define RECORD_TIME(index) \
-  do { if ((d_time) && (lane_id) == 0) (d_time)[(index)] = wall_clock64(); } while(0)
+// d_time: [block_id][warp_id][data]
+// 80 blocks, 16 warps per block, 16 entries per warp
+// Layout per warp: [t0-t9 (10 timestamps), rank, dest, source, bytes, pe, qpId]
+#define ENTRIES_PER_WARP 16
+#define RECORD_TIME(index)                                                 \
+  do {                                                                     \
+    if ((d_time) && is_leader) {                                           \
+      int block_id = blockIdx.x;                                           \
+      int warp_id = threadIdx.x / warpSize;                                \
+      int offset = (block_id * 16 + warp_id) * ENTRIES_PER_WARP + (index); \
+      (d_time)[offset] = wall_clock64();                                   \
+    }                                                                      \
+  } while (0)
+
+#define RECORD_PARAM_INFO(dest_ptr, source_ptr, bytes_val, pe_val, qpId_val) \
+  do {                                                                       \
+    if ((d_time) && is_leader) {                                             \
+      int block_id = blockIdx.x;                                             \
+      int warp_id = threadIdx.x / warpSize;                                  \
+      int base_offset = (block_id * 16 + warp_id) * ENTRIES_PER_WARP;        \
+      (d_time)[base_offset + 10] = globalGpuStates->rank;                    \
+      (d_time)[base_offset + 11] = reinterpret_cast<uintptr_t>(dest_ptr);    \
+      (d_time)[base_offset + 12] = reinterpret_cast<uintptr_t>(source_ptr);  \
+      (d_time)[base_offset + 13] = static_cast<uint64_t>(bytes_val);         \
+      (d_time)[base_offset + 14] = static_cast<uint64_t>(pe_val);            \
+      (d_time)[base_offset + 15] = static_cast<uint64_t>(qpId_val);          \
+    }                                                                        \
+  } while (0)
 
 /* ---------------------------------------------------------------------------------------------- */
 /*                      Pure Address-Based RDMA Kernels (New API)                                 */
@@ -1141,7 +1167,6 @@ inline __device__ void ShmemPutMemNbiThreadKernelAddrImpl(const void* dest, cons
   int lane_id = threadIdx.x % 64;
   GpuStates* globalGpuStates = GetGlobalGpuStatesPtr();
   uint64_t* d_time = globalGpuStates->timingBuffer;
-  RECORD_TIME(0);
   application::RdmaEndpoint* ep = globalGpuStates->rdmaEndpoints;
   int epIndex = pe * globalGpuStates->numQpPerPe + (qpId % globalGpuStates->numQpPerPe);
   core::WorkQueueHandle* wq = &ep[epIndex].wqHandle;
@@ -1159,6 +1184,10 @@ inline __device__ void ShmemPutMemNbiThreadKernelAddrImpl(const void* dest, cons
   uint8_t num_active_lanes = core::GetActiveLaneCount(activemask);
   uint8_t my_logical_lane_id = core::GetActiveLaneNum(activemask);
   bool is_leader{my_logical_lane_id == num_active_lanes - 1};
+
+  // Record parameters at the beginning
+  RECORD_PARAM_INFO(dest, source, bytes, pe, qpId);
+  RECORD_TIME(0);
   const uint64_t leader_phys_lane_id = core::GetLastActiveLaneID(activemask);
   uint32_t warp_sq_counter{0};
   uint32_t warp_msntbl_counter{0}, warp_psn_counter{0};
@@ -1183,7 +1212,7 @@ inline __device__ void ShmemPutMemNbiThreadKernelAddrImpl(const void* dest, cons
       assert(false);
     }
   }
-  RECORD_TIME(2);//60+us
+  RECORD_TIME(2);  // 60+us
   warp_sq_counter = __shfl(warp_sq_counter, leader_phys_lane_id);
   if constexpr (PrvdType == core::ProviderType::MLX5) {
     my_sq_counter = warp_sq_counter + my_logical_lane_id;
@@ -1223,24 +1252,23 @@ inline __device__ void ShmemPutMemNbiThreadKernelAddrImpl(const void* dest, cons
   } else {
     assert(false);
   }
-  RECORD_TIME(5);//7us
+  RECORD_TIME(5);  // 7us
   if (is_leader) {
     uint64_t db_touched{0};
     do {
       db_touched = __hip_atomic_load(&wq->dbTouchIdx, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
     } while (db_touched != warp_sq_counter);
-    RECORD_TIME(6);//~100us
+    RECORD_TIME(6);  //~100us
 
     core::UpdateSendDbrRecord<PrvdType>(wq->dbrRecAddr, warp_sq_counter + num_active_lanes);
     // __threadfence_system();
     core::RingDoorbell<PrvdType>(wq->dbrAddr, dbr_val);
     // __threadfence_system();
-    RECORD_TIME(7);
 
     __hip_atomic_fetch_add(&cq->needConsIdx, 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
     __hip_atomic_store(&wq->dbTouchIdx, warp_sq_counter + num_active_lanes, __ATOMIC_RELAXED,
                        __HIP_MEMORY_SCOPE_AGENT);
-    RECORD_TIME(8);
+    RECORD_TIME(7);
   }
 }
 
