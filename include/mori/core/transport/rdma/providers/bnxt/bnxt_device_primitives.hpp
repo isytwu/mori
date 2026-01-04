@@ -66,7 +66,7 @@ inline __device__ uint64_t bnxt_re_init_db_hdr(int32_t indx, uint32_t toggle, ui
 inline __device__ void atomic_add_packed_msn_and_psn(uint64_t* msnPack, uint32_t incSlot,
                                                      uint32_t incPsn, uint32_t* oldSlot,
                                                      uint32_t* oldPsn) {
-  uint64_t expected = __hip_atomic_load(msnPack, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
+  uint64_t expected = __hip_atomic_load(msnPack, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
   while (true) {
     uint32_t curSlot = static_cast<uint32_t>(expected & 0xFFFFFFFF);
     uint32_t curPsn = static_cast<uint32_t>((expected >> 32) & 0xFFFFFFFF);
@@ -308,6 +308,12 @@ inline __device__ uint64_t BnxtPostReadWrite(WorkQueueHandle& wq, uint32_t curPo
   ThreadCopy<char>(base + 0 * BNXT_RE_SLOT_SIZE, reinterpret_cast<char*>(&hdr), sizeof(hdr));
   ThreadCopy<char>(base + 1 * BNXT_RE_SLOT_SIZE, reinterpret_cast<char*>(&rdma), sizeof(rdma));
   ThreadCopy<char>(base + 2 * BNXT_RE_SLOT_SIZE, reinterpret_cast<char*>(&sge), sizeof(sge));
+  // memcpy(reinterpret_cast<struct bnxt_re_bsqe*>(base + 0 * BNXT_RE_SLOT_SIZE), &hdr,
+  //        sizeof(struct bnxt_re_bsqe));
+  // memcpy(reinterpret_cast<struct bnxt_re_rdma*>(base + 1 * BNXT_RE_SLOT_SIZE), &rdma,
+  //        sizeof(struct bnxt_re_rdma));
+  // memcpy(reinterpret_cast<struct bnxt_re_sge*>(base + 2 * BNXT_RE_SLOT_SIZE), &sge,
+  //        sizeof(struct bnxt_re_sge));
 
   // fill psns in msn Table for retransmissions
   uint32_t msntblIdx = curMsntblSlotIdx % wq.msntblNum;
