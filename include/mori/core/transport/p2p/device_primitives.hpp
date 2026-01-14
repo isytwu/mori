@@ -196,12 +196,14 @@ inline __device__ void ThreadCopy(T* dst, T* src, size_t nelems) {
   int offset = 0;
 
   while ((offset + vecSize) <= nelems) {
-    store<VecBytes>(dst + offset, reinterpret_cast<DataType*>(src + offset)[0]);
+    reinterpret_cast<uint4*>(dst + offset)[0] = reinterpret_cast<uint4*>(src + offset)[0];
+    // store<VecBytes>(dst + offset, reinterpret_cast<DataType*>(src + offset)[0]);
     offset += vecSize;
   }
 
   while (offset < nelems) {
-    store<sizeof(T)>(dst + offset, src[offset]);
+    dst[offset] = src[offset];
+    // store<sizeof(T)>(dst + offset, src[offset]);
     offset += 1;
   }
 }

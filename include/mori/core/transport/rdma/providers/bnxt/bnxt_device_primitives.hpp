@@ -275,10 +275,6 @@ inline __device__ uint64_t BnxtPostReadWrite(WorkQueueHandle& wq, uint32_t curPo
   uint32_t wqeNum = wq.sqWqeNum;
   uint32_t mtuSize = wq.mtuSize;
 
-  struct bnxt_re_bsqe hdr;
-  struct bnxt_re_rdma rdma;
-  struct bnxt_re_sge sge;
-
   // constexpr int sendWqeSize =
   //     sizeof(struct bnxt_re_bsqe) + sizeof(struct bnxt_re_rdma) + sizeof(struct bnxt_re_sge);
   // constexpr int slotsNum = CeilDiv(sendWqeSize, BNXT_RE_SLOT_SIZE);
@@ -292,6 +288,11 @@ inline __device__ uint64_t BnxtPostReadWrite(WorkQueueHandle& wq, uint32_t curPo
   uint32_t wqe_size = BNXT_RE_HDR_WS_MASK & BNXT_RE_NUM_SLOT_PER_WQE;
   uint32_t hdr_flags = BNXT_RE_HDR_FLAGS_MASK & signalFlag;
   uint32_t wqe_type = BNXT_RE_HDR_WT_MASK & opcode;
+#if 1
+  struct bnxt_re_bsqe hdr;
+  struct bnxt_re_rdma rdma;
+  struct bnxt_re_sge sge;
+
   hdr.rsv_ws_fl_wt =
       (wqe_size << BNXT_RE_HDR_WS_SHIFT) | (hdr_flags << BNXT_RE_HDR_FLAGS_SHIFT) | wqe_type;
   hdr.key_immd = 0;
@@ -308,6 +309,30 @@ inline __device__ uint64_t BnxtPostReadWrite(WorkQueueHandle& wq, uint32_t curPo
   ThreadCopy<char>(base + 0 * BNXT_RE_SLOT_SIZE, reinterpret_cast<char*>(&hdr), sizeof(hdr));
   ThreadCopy<char>(base + 1 * BNXT_RE_SLOT_SIZE, reinterpret_cast<char*>(&rdma), sizeof(rdma));
   ThreadCopy<char>(base + 2 * BNXT_RE_SLOT_SIZE, reinterpret_cast<char*>(&sge), sizeof(sge));
+  // auto* hdr_ptr = reinterpret_cast<bnxt_re_bsqe*>(base + 0 * BNXT_RE_SLOT_SIZE);
+  // auto* rdma_ptr = reinterpret_cast<bnxt_re_rdma*>(base + 1 * BNXT_RE_SLOT_SIZE);
+  // auto* sge_ptr = reinterpret_cast<bnxt_re_sge*>(base + 2 * BNXT_RE_SLOT_SIZE);
+  // *hdr_ptr = hdr;
+  // *rdma_ptr = rdma;
+  // *sge_ptr = sge;
+#else
+  char* base = reinterpret_cast<char*>(queueBuffAddr) + slotIdx * BNXT_RE_SLOT_SIZE;
+  auto* hdr_ptr = reinterpret_cast<bnxt_re_bsqe*>(base + 0 * BNXT_RE_SLOT_SIZE);
+  auto* rdma_ptr = reinterpret_cast<bnxt_re_rdma*>(base + 1 * BNXT_RE_SLOT_SIZE);
+  auto* sge_ptr = reinterpret_cast<bnxt_re_sge*>(base + 2 * BNXT_RE_SLOT_SIZE);
+
+  hdr_ptr->rsv_ws_fl_wt =
+      (wqe_size << BNXT_RE_HDR_WS_SHIFT) | (hdr_flags << BNXT_RE_HDR_FLAGS_SHIFT) | wqe_type;
+  hdr_ptr->key_immd = 0;
+  hdr_ptr->lhdr.qkey_len = bytes;
+
+  rdma_ptr->rva = (uint64_t)raddr;
+  rdma_ptr->rkey = rkey & 0xffffffff;
+
+  sge_ptr->pa = (uint64_t)laddr;
+  sge_ptr->lkey = lkey & 0xffffffff;
+  sge_ptr->length = bytes;
+#endif
 
   // fill psns in msn Table for retransmissions
   uint32_t msntblIdx = curMsntblSlotIdx % wq.msntblNum;
