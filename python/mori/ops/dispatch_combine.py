@@ -22,6 +22,7 @@
 from mori import cpp as mori_cpp
 
 from dataclasses import dataclass
+from typing import Optional
 import torch
 import torch.distributed as dist
 
@@ -85,6 +86,12 @@ class EpDispatchCombineOp:
         self._dispatch_func = _cpp_dispatch_combine_factory("launch_dispatch")
         self._combine_func = _cpp_dispatch_combine_factory("launch_combine")
         self._reset_func = _cpp_dispatch_combine_factory("launch_reset")
+        self._convert_dispatch_output_func = _cpp_dispatch_combine_factory(
+            "convert_dispatch_output"
+        )
+        self._convert_combine_input_func = _cpp_dispatch_combine_factory(
+            "convert_combine_input"
+        )
         self._get_dispatch_src_token_pos_func = _cpp_dispatch_combine_factory(
             "get_dispatch_src_token_pos"
         )
@@ -145,6 +152,42 @@ class EpDispatchCombineOp:
         if call_reset:
             self._reset_func(self._handle)
         return output
+
+    def convert_dispatch_output(
+        self,
+        dispatch_out_x: torch.Tensor,
+        dispatch_out_topk_idx: torch.Tensor,
+        block_num: int = -1,
+        warp_per_block: int = -1,
+    ):
+        return self._convert_dispatch_output_func(
+            self._handle,
+            dispatch_out_x,
+            dispatch_out_topk_idx,
+            block_num,
+            warp_per_block,
+        )
+
+    def convert_combine_input(
+        self,
+        packed_recv_x: torch.Tensor,
+        topk_idx: torch.Tensor,
+        packed_recv_src_info: torch.Tensor,
+        packed_recv_layout_range: torch.Tensor,
+        topk_weights: Optional[torch.Tensor] = None,
+        block_num: int = -1,
+        warp_per_block: int = -1,
+    ):
+        return self._convert_combine_input_func(
+            self._handle,
+            packed_recv_x,
+            topk_idx,
+            packed_recv_src_info,
+            packed_recv_layout_range,
+            topk_weights,
+            block_num,
+            warp_per_block,
+        )
 
     def reset(self):
         self._reset_func(self._handle)

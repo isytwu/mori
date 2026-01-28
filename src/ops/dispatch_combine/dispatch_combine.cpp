@@ -30,6 +30,7 @@
 #include "mori/shmem/shmem.hpp"
 #include "mori/utils/hip_helper.hpp"
 #include "mori/utils/mori_log.hpp"
+#include "src/ops/dispatch_combine/convert.hpp"
 #include "src/ops/dispatch_combine/internode.hpp"
 #include "src/ops/dispatch_combine/internode_v1.hpp"
 #include "src/ops/dispatch_combine/intranode.hpp"
@@ -209,6 +210,11 @@ void EpDispatchCombineHandle::InitializeOrderMapBuf() {
       config.worldSize / config.gpuPerNode * config.maxNumInpTokenPerRank * sizeof(index_t);
   HIP_RUNTIME_CHECK(hipMalloc(&interNodeDispSendMap, interNodeDispSendMapSize));
   HIP_RUNTIME_CHECK(hipMemset(interNodeDispSendMap, 0, interNodeDispSendMapSize));
+
+  const size_t maxDispatchTokens = static_cast<size_t>(config.MaxNumTokensToRecv());
+  const size_t mapSize = maxDispatchTokens * config.numExpertPerToken * sizeof(uint64_t);
+  HIP_RUNTIME_CHECK(hipMalloc(&dispTokToEpSlotMap, mapSize));
+  HIP_RUNTIME_CHECK(hipMemset(dispTokToEpSlotMap, 0, mapSize));
 }
 
 void EpDispatchCombineHandle::FinalizeOrderMapBuf() {
@@ -225,6 +231,7 @@ void EpDispatchCombineHandle::FinalizeOrderMapBuf() {
   HIP_RUNTIME_CHECK(hipFree(interNodeDispDestTokIdMap));
   HIP_RUNTIME_CHECK(hipFree(blockFlagCounter));
   HIP_RUNTIME_CHECK(hipFree(interNodeDispSendMap));
+  HIP_RUNTIME_CHECK(hipFree(dispTokToEpSlotMap));
 }
 
 void EpDispatchCombineHandle::InitializeBarrier() {
@@ -357,6 +364,79 @@ void EpDispatchCombineHandle::LaunchCombine(KernelType kernelType, int blockNum,
         }
       },
       argsVariant);
+}
+
+void EpDispatchCombineHandle::LaunchConvertDispatchOutputKernel(const void* dispatchOutX,
+                                                                const void* dispatchOutTopkIdx,
+                                                                void* packedRecvX,
+                                                                void* packedRecvCount,
+                                                                void* packedRecvSrcInfo,
+                                                                void* packedRecvLayoutRange,
+                                                                int blockNum, int warpPerBlock,
+                                                                hipStream_t stream) {
+  size_t actualWarpNumPerBlock = (warpPerBlock <= 0) ? config.warpNumPerBlock : warpPerBlock;
+  dim3 grid((blockNum <= 0) ? config.blockNum : blockNum);
+  dim3 block(warpSize * actualWarpNumPerBlock);
+
+  ConvertDispatchOutputArgs args{};
+  args.config = config;
+  args.dispatchOutX = dispatchOutX;
+  args.dispatchOutTopkIdx = dispatchOutTopkIdx;
+  args.dispatchSrcTokenPos = dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>();
+  args.totalRecvTokenNum = totalRecvTokenNum;
+  args.packedRecvX = packedRecvX;
+  args.packedRecvCount = packedRecvCount;
+  args.packedRecvSrcInfo = packedRecvSrcInfo;
+  args.packedRecvLayoutRange = packedRecvLayoutRange;
+  args.dispTokToEpSlotMap = dispTokToEpSlotMap;
+
+  ConvertDispatchOutputKernel<<<grid, block, 0, stream>>>(args);
+}
+
+void EpDispatchCombineHandle::LaunchConvertCombineInputKernel(const void* packedRecvX,
+                                                              const void* topkIdx,
+                                                              const void* topkWeights,
+                                                              const void* packedRecvSrcInfo,
+                                                              const void* packedRecvLayoutRange,
+                                                              void* combineOut, int blockNum,
+                                                              int warpPerBlock,
+                                                              hipStream_t stream) {
+  size_t actualWarpNumPerBlock = (warpPerBlock <= 0) ? config.warpNumPerBlock : warpPerBlock;
+  dim3 grid((blockNum <= 0) ? config.blockNum : blockNum);
+  dim3 block(warpSize * actualWarpNumPerBlock);
+
+  ConvertCombineInputArgs args{};
+  args.config = config;
+  args.packedRecvX = packedRecvX;
+  args.topkIdx = topkIdx;
+  args.topkWeights = topkWeights;
+  args.packedRecvSrcInfo = packedRecvSrcInfo;
+  args.packedRecvLayoutRange = packedRecvLayoutRange;
+  args.totalRecvTokenNum = totalRecvTokenNum;
+  args.combineInput = combineOut;
+  args.dispTokToEpSlotMap = dispTokToEpSlotMap;
+
+  switch (inputType) {
+    case HIP_R_32F:
+      ConvertCombineInputKernel<float><<<grid, block, 0, stream>>>(args);
+      break;
+    case HIP_R_16BF:
+      ConvertCombineInputKernel<hip_bfloat16><<<grid, block, 0, stream>>>(args);
+      break;
+#ifdef MORI_FP8_TYPE_OCP_ENABLED
+    case HIP_R_8F_E4M3:
+      ConvertCombineInputKernel<__hip_fp8_e4m3><<<grid, block, 0, stream>>>(args);
+      break;
+#endif
+#ifdef MORI_FP8_TYPE_FNUZ_ENABLED
+    case HIP_R_8F_E4M3_FNUZ:
+      ConvertCombineInputKernel<__hip_fp8_e4m3_fnuz><<<grid, block, 0, stream>>>(args);
+      break;
+#endif
+    default:
+      assert(false);
+      break;
+  }
 }
 
 // no need for a separate reset kernel now

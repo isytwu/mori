@@ -77,7 +77,8 @@ inline size_t GetHipDataTypeSize(hipDataType dtype) {
 
 using index_t = int32_t;
 
-#define MAX_EXPERTS_PER_TOKEN (8)
+
+#define MAX_EXPERTS_PER_TOKEN (9)
 struct EpDispatchCombineConfig {
   int rank{0};
   int worldSize{0};
@@ -149,6 +150,17 @@ class EpDispatchCombineHandle {
   void LaunchCombine(KernelType, int blockNum = -1, int warpPerBlock = -1, hipStream_t = 0);
   void LaunchReset(hipStream_t = 0);
 
+  void LaunchConvertDispatchOutputKernel(const void* dispatchOutX, const void* dispatchOutTopkIdx,
+                                         void* packedRecvX,
+                                         void* packedRecvCount, void* packedRecvSrcInfo,
+                                         void* packedRecvLayoutRange, int blockNum = -1,
+                                         int warpPerBlock = -1, hipStream_t = 0);
+  void LaunchConvertCombineInputKernel(const void* packedRecvX, const void* topkIdx,
+                                       const void* topkWeights, const void* packedRecvSrcInfo,
+                                       const void* packedRecvLayoutRange, void* combineInput,
+                                       int blockNum = -1, int warpPerBlock = -1,
+                                       hipStream_t = 0);
+
   index_t GetCurRankNumToken() const { return curRankNumToken; }
 
  private:
@@ -213,6 +225,10 @@ class EpDispatchCombineHandle {
   // Map dispatch staging buffer index to output buffer index, saved at dispatch recv phase and used
   // at combine send phase
   index_t* dispReceiverIdxMap{nullptr};
+
+  // Map dispatch token to expert slot index (size: MaxNumTokensToRecv * numExpertPerToken).
+  // Stored as linear index into packedRecvX (element index, not bytes); -1 means invalid.
+  uint64_t* dispTokToEpSlotMap{nullptr};
 
   // Map staging buffer index to dispatch input token index, saved at dispatch init phase and used
   // at dispatch send phase
