@@ -36,7 +36,6 @@
 #include "mori/application/application.hpp"
 #include "mori/core/profiler/constants.hpp"
 #include "mori/io/io.hpp"
-#include "mori/ops/event.hpp"
 #include "mori/ops/ops.hpp"
 #include "mori/pybind/profiler_registry.hpp"
 #include "mori/shmem/shmem.hpp"
@@ -648,9 +647,6 @@ void RegisterMoriOps(py::module_& m) {
       .export_values();
 
   mori::pybind::RegisterAllProfilerSlots(m);
-  // pybind11::class_<mori::EventHandle>(m, "EventHandle")
-  //     .def(pybind11::init<>())
-  //     .def("current_stream_wait", &mori::EventHandle::current_stream_wait);
 
   pybind11::class_<mori::moe::EpDispatchCombineConfig>(m, "EpDispatchCombineConfig")
       .def(pybind11::init<int, int, int, int, int, int, int, int, int, int, int, bool,

@@ -226,8 +226,8 @@ class EpDispatchCombineHandle {
   // at combine send phase
   index_t* dispReceiverIdxMap{nullptr};
 
-  // Map dispatch token to expert slot index (size: MaxNumTokensToRecv * numExpertPerToken).
-  // Stored as linear index into packedRecvX (element index, not bytes); -1 means invalid.
+  // Map dispatch token to expert slot index (size: MaxNumTokensToRecv * numExpertPerToken), saved
+  // at ConvertDispatchOutput and used at ConvertCombineInput
   uint64_t* dispTokToEpSlotMap{nullptr};
 
   // Map staging buffer index to dispatch input token index, saved at dispatch init phase and used
