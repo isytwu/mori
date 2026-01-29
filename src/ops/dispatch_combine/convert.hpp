@@ -37,6 +37,7 @@ struct ConvertDispatchOutputArgs {
   const void* dispatchOutTopkIdx{nullptr};
   const index_t* dispatchSrcTokenPos{nullptr};
   const index_t* totalRecvTokenNum{nullptr};
+  uint32_t* dispatchGridBarrier{nullptr};
   void* packedRecvX{nullptr};
   void* packedRecvCount{nullptr};
   void* packedRecvSrcInfo{nullptr};
@@ -56,7 +57,7 @@ struct ConvertCombineInputArgs {
   uint64_t* dispTokToEpSlotMap{nullptr};
 };
 
-__global__ void ConvertDispatchOutputKernel(ConvertDispatchOutputArgs args) {
+__device__ inline void ConvertDispatchOutputDevice(ConvertDispatchOutputArgs args) {
   const EpDispatchCombineConfig& config = args.config;
   const int thdId = threadIdx.x;
   const int warpId = thdId / warpSize;
@@ -81,6 +82,21 @@ __global__ void ConvertDispatchOutputKernel(ConvertDispatchOutputArgs args) {
   (void)args.packedRecvLayoutRange;
   auto* dispTokToEpSlotMap = args.dispTokToEpSlotMap;
 
+  if (thdId < args.config.numExpertPerRank) {
+    packedRecvCount[thdId] = 0;
+  }
+  uint32_t* dispatchGridBarrier = args.dispatchGridBarrier + 1;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    __threadfence();
+    __hip_atomic_fetch_add(dispatchGridBarrier, 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+
+    while (atomicCAS(dispatchGridBarrier, gridDim.x, 0) != 0) {
+      __builtin_amdgcn_s_sleep(1);
+    }
+  }
+  __syncthreads();
+
   const int64_t totalTokens = static_cast<int64_t>(args.totalRecvTokenNum[0]);
   for (int i = globalWarpId; i < totalTokens * topk; i += globalWarpNum) {
     auto tokenIdx = i / topk;
@@ -88,6 +104,7 @@ __global__ void ConvertDispatchOutputKernel(ConvertDispatchOutputArgs args) {
     const auto localExpert = expertId - config.rank * config.numExpertPerRank;
     if (localExpert < 0 || localExpert >= config.numExpertPerRank) {
       if (laneId == 0) {
+        // TODO: do not use -1
         dispTokToEpSlotMap[i] = static_cast<uint64_t>(-1);
       }
       continue;
@@ -103,13 +120,20 @@ __global__ void ConvertDispatchOutputKernel(ConvertDispatchOutputArgs args) {
     uint32_t idx = 0;
     if (laneId == 0) {
       idx = atomicAdd(packedRecvCount + localExpert, 1u);
+#if 0
+      if (config.rank == 0 || config.rank == 1) {
+        printf("[ConvertDispatchOutputKernel] rank=%d tokenIdx=%lld localExpert=%lld idx=%u\n",
+               config.rank, static_cast<long long>(tokenIdx), static_cast<long long>(localExpert), idx);
+      }
+#endif
     }
     idx = __shfl(idx, 0);
 
     const uint64_t linearIndex =
         static_cast<uint64_t>(localExpert) * maxTokensPerExpert + idx;
     if (laneId == 0) {
-      packedRecvSrcInfo[linearIndex] = srcInfo;
+      // packedRecvSrcInfo[linearIndex] = srcInfo;
+      packedRecvSrcInfo[linearIndex] = srcTokenPos;
       dispTokToEpSlotMap[i] = linearIndex;
     }
 
@@ -119,6 +143,10 @@ __global__ void ConvertDispatchOutputKernel(ConvertDispatchOutputArgs args) {
     auto* dstBytes = packedRecvX + dstOffset;
     core::WarpCopy<uint8_t>(dstBytes, srcBytes, hiddenBytes);
   }
+}
+
+__global__ void ConvertDispatchOutputKernel(ConvertDispatchOutputArgs args) {
+  ConvertDispatchOutputDevice(args);
 }
 
 template <typename T>

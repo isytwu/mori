@@ -24,6 +24,7 @@
 #include "mori/core/core.hpp"
 #include "mori/ops/dispatch_combine/dispatch_combine.hpp"
 #include "mori/shmem/shmem.hpp"
+#include "src/ops/dispatch_combine/convert.hpp"
 
 namespace mori {
 namespace moe {
@@ -69,7 +70,7 @@ inline __device__ void CrossDeviceBarrierIntraNodeKernel(EpDispatchCombineArgs<T
 /* ---------------------------------------------------------------------------------------------- */
 /*                                    EpDispatchIntraNodeKernel                                   */
 /* ---------------------------------------------------------------------------------------------- */
-template <typename T>
+template <typename T, bool EnableStdMoE = false>
 __global__ void EpDispatchIntraNodeKernel(EpDispatchCombineArgs<T> args) {
   const EpDispatchCombineConfig& config = args.config;
 
@@ -187,6 +188,35 @@ __global__ void EpDispatchIntraNodeKernel(EpDispatchCombineArgs<T> args) {
     if (laneId == 0) {
       args.dispTokOffsetMemObj->template GetAs<index_t*>()[0] = 0;
     }
+  }
+
+  if constexpr (EnableStdMoE) {
+    // if (thdId < args.config.numExpertPerRank) {
+    //   (reinterpret_cast<uint32_t*>(args.standardPackedRecvCount))[thdId] = 0;
+    // }
+    // __syncthreads();
+    // uint32_t* barrierPtr = args.dispatchGridBarrier + 1;
+    // if (laneId == 0) atomicAdd(barrierPtr, 1);
+    // if (globalWarpId == 0) {
+    //   shmem::ShmemUint32WaitUntilEquals(barrierPtr, globalWarpNum);
+    //   barrierPtr[0] = 0;
+    // }
+    // __syncthreads();
+
+    ConvertDispatchOutputArgs convArgs{};
+    convArgs.config = args.config;
+    convArgs.dispatchOutX = args.shmemDispatchOutTokMemObj->template GetAs<T*>(myPe);
+    convArgs.dispatchOutTopkIdx = args.shmemOutIndicesMemObj->template GetAs<index_t*>(myPe);
+    convArgs.dispatchSrcTokenPos =
+        args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe);
+    convArgs.totalRecvTokenNum = args.totalRecvTokenNum;
+    convArgs.dispatchGridBarrier = args.dispatchGridBarrier;
+    convArgs.packedRecvX = args.standardPackedRecvX;
+    convArgs.packedRecvCount = args.standardPackedRecvCount;
+    convArgs.packedRecvSrcInfo = args.standardPackedRecvSrcInfo;
+    convArgs.packedRecvLayoutRange = args.standardPackedRecvLayoutRange;
+    convArgs.dispTokToEpSlotMap = args.dispTokToEpSlotMap;
+    ConvertDispatchOutputDevice(convArgs);
   }
 }
 

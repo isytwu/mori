@@ -84,6 +84,9 @@ class EpDispatchCombineOp:
         )
 
         self._dispatch_func = _cpp_dispatch_combine_factory("launch_dispatch")
+        self._dispatch_standard_moe_func = _cpp_dispatch_combine_factory(
+            "launch_dispatch_standard_moe"
+        )
         self._combine_func = _cpp_dispatch_combine_factory("launch_combine")
         self._reset_func = _cpp_dispatch_combine_factory("launch_reset")
         self._convert_dispatch_output_func = _cpp_dispatch_combine_factory(
@@ -121,6 +124,26 @@ class EpDispatchCombineOp:
         warp_per_block: int = -1,
     ):
         return self._dispatch_func(
+            self._handle,
+            self.config.kernel_type.value,
+            input,
+            weights,
+            scales,
+            indices,
+            block_num,
+            warp_per_block,
+        )
+
+    def dispatch_standard_moe(
+        self,
+        input: torch.Tensor,
+        weights: torch.Tensor,
+        scales: torch.Tensor,
+        indices: torch.Tensor,
+        block_num: int = -1,
+        warp_per_block: int = -1,
+    ):
+        return self._dispatch_standard_moe_func(
             self._handle,
             self.config.kernel_type.value,
             input,
@@ -171,20 +194,16 @@ class EpDispatchCombineOp:
     def convert_combine_input(
         self,
         packed_recv_x: torch.Tensor,
-        topk_idx: torch.Tensor,
         packed_recv_src_info: torch.Tensor,
         packed_recv_layout_range: torch.Tensor,
-        topk_weights: Optional[torch.Tensor] = None,
         block_num: int = -1,
         warp_per_block: int = -1,
     ):
         return self._convert_combine_input_func(
             self._handle,
             packed_recv_x,
-            topk_idx,
             packed_recv_src_info,
             packed_recv_layout_range,
-            topk_weights,
             block_num,
             warp_per_block,
         )

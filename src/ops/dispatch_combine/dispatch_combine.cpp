@@ -211,10 +211,12 @@ void EpDispatchCombineHandle::InitializeOrderMapBuf() {
   HIP_RUNTIME_CHECK(hipMalloc(&interNodeDispSendMap, interNodeDispSendMapSize));
   HIP_RUNTIME_CHECK(hipMemset(interNodeDispSendMap, 0, interNodeDispSendMapSize));
 
+#ifdef ENABLE_STANDARD_MOE_ADAPT
   const size_t maxDispatchTokens = static_cast<size_t>(config.MaxNumTokensToRecv());
   const size_t mapSize = maxDispatchTokens * config.numExpertPerToken * sizeof(uint64_t);
   HIP_RUNTIME_CHECK(hipMalloc(&dispTokToEpSlotMap, mapSize));
   HIP_RUNTIME_CHECK(hipMemset(dispTokToEpSlotMap, 0, mapSize));
+#endif
 }
 
 void EpDispatchCombineHandle::FinalizeOrderMapBuf() {
@@ -293,7 +295,7 @@ void EpDispatchCombineHandle::LaunchInterNodeCombine(int blockNum, int warpPerBl
 }
 
 void EpDispatchCombineHandle::LaunchDispatch(KernelType kernelType, int blockNum, int warpPerBlock,
-                                             hipStream_t stream) {
+                                             hipStream_t stream, bool enableStandardMoeOutput) {
   size_t actualWarpNumPerBlock = (warpPerBlock <= 0) ? config.warpNumPerBlock : warpPerBlock;
   dim3 grid((blockNum <= 0) ? config.blockNum : blockNum);
   dim3 block(warpSize * actualWarpNumPerBlock);
@@ -318,7 +320,11 @@ void EpDispatchCombineHandle::LaunchDispatch(KernelType kernelType, int blockNum
           EpDispatchCopyToStaging<<<this->multiProcessorCount, block, 0, stream>>>(args);
           EpDispatchInterNodeV1KernelLowLatency<<<grid, block, sharedMemSize, stream>>>(args);
         } else if (kernelType == KernelType::IntraNode) {
-          EpDispatchIntraNodeKernel<DataT><<<grid, block, sharedMemSize, stream>>>(args);
+          if (enableStandardMoeOutput) {
+            EpDispatchIntraNodeKernel<DataT, true><<<grid, block, sharedMemSize, stream>>>(args);
+          } else {
+            EpDispatchIntraNodeKernel<DataT, false><<<grid, block, sharedMemSize, stream>>>(args);
+          }
         } else {
           assert(false);
         }
@@ -389,13 +395,12 @@ void EpDispatchCombineHandle::LaunchConvertDispatchOutputKernel(const void* disp
   args.packedRecvSrcInfo = packedRecvSrcInfo;
   args.packedRecvLayoutRange = packedRecvLayoutRange;
   args.dispTokToEpSlotMap = dispTokToEpSlotMap;
+  args.dispatchGridBarrier = dispatchGridBarrier;
 
   ConvertDispatchOutputKernel<<<grid, block, 0, stream>>>(args);
 }
 
 void EpDispatchCombineHandle::LaunchConvertCombineInputKernel(const void* packedRecvX,
-                                                              const void* topkIdx,
-                                                              const void* topkWeights,
                                                               const void* packedRecvSrcInfo,
                                                               const void* packedRecvLayoutRange,
                                                               void* combineOut, int blockNum,
@@ -408,8 +413,8 @@ void EpDispatchCombineHandle::LaunchConvertCombineInputKernel(const void* packed
   ConvertCombineInputArgs args{};
   args.config = config;
   args.packedRecvX = packedRecvX;
-  args.topkIdx = topkIdx;
-  args.topkWeights = topkWeights;
+  args.topkIdx = shmemOutIndicesMemObj->Get();
+  args.topkWeights = shmemDispatchOutWeightsMemObj->Get();
   args.packedRecvSrcInfo = packedRecvSrcInfo;
   args.packedRecvLayoutRange = packedRecvLayoutRange;
   args.totalRecvTokenNum = totalRecvTokenNum;

@@ -140,13 +140,31 @@ class EpDispatchCombineHandle {
     // printf("handle inputType %s\n", HipDataTypeToString(inputType));
   }
 
+  void SetStandardMoeOutputBuffers(void* packedRecvX, void* packedRecvCount,
+                                   void* packedRecvSrcInfo, void* packedRecvLayoutRange) {
+    enableStandardMoeOutput = true;
+    standardPackedRecvX = packedRecvX;
+    standardPackedRecvCount = packedRecvCount;
+    standardPackedRecvSrcInfo = packedRecvSrcInfo;
+    standardPackedRecvLayoutRange = packedRecvLayoutRange;
+  }
+
+  void ClearStandardMoeOutputBuffers() {
+    enableStandardMoeOutput = false;
+    standardPackedRecvX = nullptr;
+    standardPackedRecvCount = nullptr;
+    standardPackedRecvSrcInfo = nullptr;
+    standardPackedRecvLayoutRange = nullptr;
+  }
+
   // When blockNum and warpPerBlock <= 0, kernel will use default values in config
   void LaunchIntraNodeDispatch(int blockNum = -1, int warpPerBlock = -1, hipStream_t = 0);
   void LaunchInterNodeDispatch(int blockNum = -1, int warpPerBlock = -1, hipStream_t = 0);
   void LaunchIntraNodeCombine(int blockNum = -1, int warpPerBlock = -1, hipStream_t = 0);
   void LaunchInterNodeCombine(int blockNum = -1, int warpPerBlock = -1, hipStream_t = 0);
 
-  void LaunchDispatch(KernelType, int blockNum = -1, int warpPerBlock = -1, hipStream_t = 0);
+  void LaunchDispatch(KernelType, int blockNum = -1, int warpPerBlock = -1, hipStream_t = 0,
+                      bool enableStandardMoeOutput = false);
   void LaunchCombine(KernelType, int blockNum = -1, int warpPerBlock = -1, hipStream_t = 0);
   void LaunchReset(hipStream_t = 0);
 
@@ -155,8 +173,7 @@ class EpDispatchCombineHandle {
                                          void* packedRecvCount, void* packedRecvSrcInfo,
                                          void* packedRecvLayoutRange, int blockNum = -1,
                                          int warpPerBlock = -1, hipStream_t = 0);
-  void LaunchConvertCombineInputKernel(const void* packedRecvX, const void* topkIdx,
-                                       const void* topkWeights, const void* packedRecvSrcInfo,
+  void LaunchConvertCombineInputKernel(const void* packedRecvX, const void* packedRecvSrcInfo,
                                        const void* packedRecvLayoutRange, void* combineInput,
                                        int blockNum = -1, int warpPerBlock = -1,
                                        hipStream_t = 0);
@@ -229,6 +246,13 @@ class EpDispatchCombineHandle {
   // Map dispatch token to expert slot index (size: MaxNumTokensToRecv * numExpertPerToken), saved
   // at ConvertDispatchOutput and used at ConvertCombineInput
   uint64_t* dispTokToEpSlotMap{nullptr};
+
+  // Standard MoE output buffers (set per-dispatch when enabled).
+  bool enableStandardMoeOutput{false};
+  void* standardPackedRecvX{nullptr};
+  void* standardPackedRecvCount{nullptr};
+  void* standardPackedRecvSrcInfo{nullptr};
+  void* standardPackedRecvLayoutRange{nullptr};
 
   // Map staging buffer index to dispatch input token index, saved at dispatch init phase and used
   // at dispatch send phase
@@ -322,6 +346,13 @@ struct EpDispatchCombineArgs {
 #ifdef ENABLE_PROFILER
   mori::core::profiler::ProfilerConfig profilerConfig;
 #endif
+
+  bool enableStandardMoeOutput{false};
+  void* standardPackedRecvX{nullptr};
+  void* standardPackedRecvCount{nullptr};
+  void* standardPackedRecvSrcInfo{nullptr};
+  void* standardPackedRecvLayoutRange{nullptr};
+  uint64_t* dispTokToEpSlotMap{nullptr};
 };
 
 using EpDispatchCombineArgsVariant =
@@ -386,6 +417,12 @@ EpDispatchCombineArgs<T> GetEpDispatchCombineArgs(const EpDispatchCombineHandle&
 #ifdef ENABLE_PROFILER
   args.profilerConfig = handle.profilerConfig;
 #endif
+  args.enableStandardMoeOutput = handle.enableStandardMoeOutput;
+  args.standardPackedRecvX = handle.standardPackedRecvX;
+  args.standardPackedRecvCount = handle.standardPackedRecvCount;
+  args.standardPackedRecvSrcInfo = handle.standardPackedRecvSrcInfo;
+  args.standardPackedRecvLayoutRange = handle.standardPackedRecvLayoutRange;
+  args.dispTokToEpSlotMap = handle.dispTokToEpSlotMap;
   return args;
 }
 
