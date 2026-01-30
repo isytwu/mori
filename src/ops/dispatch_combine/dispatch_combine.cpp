@@ -375,9 +375,9 @@ void EpDispatchCombineHandle::LaunchCombine(KernelType kernelType, int blockNum,
 void EpDispatchCombineHandle::LaunchConvertDispatchOutputKernel(const void* dispatchOutX,
                                                                 const void* dispatchOutTopkIdx,
                                                                 void* packedRecvX,
-                                                                void* packedRecvCount,
-                                                                void* packedRecvSrcInfo,
-                                                                void* packedRecvLayoutRange,
+                                                                int* packedRecvCount,
+                                                                int* packedRecvSrcInfo,
+                                                                int64_t* packedRecvLayoutRange,
                                                                 int blockNum, int warpPerBlock,
                                                                 hipStream_t stream) {
   size_t actualWarpNumPerBlock = (warpPerBlock <= 0) ? config.warpNumPerBlock : warpPerBlock;

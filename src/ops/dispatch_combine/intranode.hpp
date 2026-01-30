@@ -191,24 +191,16 @@ __global__ void EpDispatchIntraNodeKernel(EpDispatchCombineArgs<T> args) {
   }
 
   if constexpr (EnableStdMoE) {
-    // if (thdId < args.config.numExpertPerRank) {
-    //   (reinterpret_cast<uint32_t*>(args.standardPackedRecvCount))[thdId] = 0;
-    // }
-    // __syncthreads();
-    // uint32_t* barrierPtr = args.dispatchGridBarrier + 1;
-    // if (laneId == 0) atomicAdd(barrierPtr, 1);
-    // if (globalWarpId == 0) {
-    //   shmem::ShmemUint32WaitUntilEquals(barrierPtr, globalWarpNum);
-    //   barrierPtr[0] = 0;
-    // }
-    // __syncthreads();
+    // clear packedRecvCount
+    if (thdId < config.numExpertPerRank) {
+      args.standardPackedRecvCount[thdId] = 0;
+    }
 
     ConvertDispatchOutputArgs convArgs{};
     convArgs.config = args.config;
     convArgs.dispatchOutX = args.shmemDispatchOutTokMemObj->template GetAs<T*>(myPe);
     convArgs.dispatchOutTopkIdx = args.shmemOutIndicesMemObj->template GetAs<index_t*>(myPe);
-    convArgs.dispatchSrcTokenPos =
-        args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe);
+    convArgs.dispatchSrcTokenPos = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe);
     convArgs.totalRecvTokenNum = args.totalRecvTokenNum;
     convArgs.dispatchGridBarrier = args.dispatchGridBarrier;
     convArgs.packedRecvX = args.standardPackedRecvX;
@@ -216,7 +208,7 @@ __global__ void EpDispatchIntraNodeKernel(EpDispatchCombineArgs<T> args) {
     convArgs.packedRecvSrcInfo = args.standardPackedRecvSrcInfo;
     convArgs.packedRecvLayoutRange = args.standardPackedRecvLayoutRange;
     convArgs.dispTokToEpSlotMap = args.dispTokToEpSlotMap;
-    ConvertDispatchOutputDevice(convArgs);
+    ConvertDispatchOutputDevice<false /*IsStandalone*/>(convArgs);
   }
 }
 

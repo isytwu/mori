@@ -25,6 +25,7 @@
 #include <hip/hip_fp8.h>
 #include <hip/library_types.h>
 
+#include <cstdint>
 #include <sstream>
 #include <variant>
 
@@ -140,8 +141,8 @@ class EpDispatchCombineHandle {
     // printf("handle inputType %s\n", HipDataTypeToString(inputType));
   }
 
-  void SetStandardMoeOutputBuffers(void* packedRecvX, void* packedRecvCount,
-                                   void* packedRecvSrcInfo, void* packedRecvLayoutRange) {
+  void SetStandardMoeOutputBuffers(void* packedRecvX, int* packedRecvCount,
+                                   int* packedRecvSrcInfo, int64_t* packedRecvLayoutRange) {
     enableStandardMoeOutput = true;
     standardPackedRecvX = packedRecvX;
     standardPackedRecvCount = packedRecvCount;
@@ -170,8 +171,8 @@ class EpDispatchCombineHandle {
 
   void LaunchConvertDispatchOutputKernel(const void* dispatchOutX, const void* dispatchOutTopkIdx,
                                          void* packedRecvX,
-                                         void* packedRecvCount, void* packedRecvSrcInfo,
-                                         void* packedRecvLayoutRange, int blockNum = -1,
+                                         int* packedRecvCount, int* packedRecvSrcInfo,
+                                         int64_t* packedRecvLayoutRange, int blockNum = -1,
                                          int warpPerBlock = -1, hipStream_t = 0);
   void LaunchConvertCombineInputKernel(const void* packedRecvX, const void* packedRecvSrcInfo,
                                        const void* packedRecvLayoutRange, void* combineInput,
@@ -250,9 +251,9 @@ class EpDispatchCombineHandle {
   // Standard MoE output buffers (set per-dispatch when enabled).
   bool enableStandardMoeOutput{false};
   void* standardPackedRecvX{nullptr};
-  void* standardPackedRecvCount{nullptr};
-  void* standardPackedRecvSrcInfo{nullptr};
-  void* standardPackedRecvLayoutRange{nullptr};
+  int* standardPackedRecvCount{nullptr};
+  int* standardPackedRecvSrcInfo{nullptr};
+  int64_t* standardPackedRecvLayoutRange{nullptr};
 
   // Map staging buffer index to dispatch input token index, saved at dispatch init phase and used
   // at dispatch send phase
@@ -349,9 +350,9 @@ struct EpDispatchCombineArgs {
 
   bool enableStandardMoeOutput{false};
   void* standardPackedRecvX{nullptr};
-  void* standardPackedRecvCount{nullptr};
-  void* standardPackedRecvSrcInfo{nullptr};
-  void* standardPackedRecvLayoutRange{nullptr};
+  int* standardPackedRecvCount{nullptr};
+  int* standardPackedRecvSrcInfo{nullptr};
+  int64_t* standardPackedRecvLayoutRange{nullptr};
   uint64_t* dispTokToEpSlotMap{nullptr};
 };
 

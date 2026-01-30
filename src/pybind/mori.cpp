@@ -169,21 +169,19 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> LaunchDis
   const int64_t maxTokensPerExpert =
       static_cast<int64_t>(handle.config.worldSize) * handle.config.maxNumInpTokenPerRank;
   const int64_t hidden = input.size(1);
-  auto options = input.options();
-  auto countOptions = torch::TensorOptions().dtype(torch::kInt32).device(input.device());
-  auto layoutOptions = torch::TensorOptions().dtype(torch::kInt64).device(input.device());
 
-  torch::Tensor packedRecvX = torch::empty({numLocalExperts, maxTokensPerExpert, hidden}, options);
-  torch::Tensor packedRecvCount = torch::empty({numLocalExperts}, countOptions);
-  // torch::Tensor packedRecvCount = torch::zeros({numLocalExperts}, countOptions);
-  torch::Tensor packedRecvSrcInfo =
-      torch::empty({numLocalExperts, maxTokensPerExpert}, countOptions);
-  torch::Tensor packedRecvLayoutRange =
-      torch::empty({numLocalExperts, handle.config.worldSize}, layoutOptions);
+  torch::Tensor packedRecvX =
+      torch::empty({numLocalExperts, maxTokensPerExpert, hidden}, input.options());
+  auto packedRecvSrcInfo = torch::empty({numLocalExperts, maxTokensPerExpert},
+                                        torch::dtype(torch::kInt32).device(torch::kCUDA));
+  auto packedRecvLayoutRange = torch::empty({numLocalExperts, handle.config.worldSize},
+                                            torch::dtype(torch::kInt64).device(torch::kCUDA));
+  auto packedRecvCount =
+      torch::empty({numLocalExperts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
 
-  handle.SetStandardMoeOutputBuffers(packedRecvX.data_ptr(), packedRecvCount.data_ptr(),
-                                     packedRecvSrcInfo.data_ptr(),
-                                     packedRecvLayoutRange.data_ptr());
+  handle.SetStandardMoeOutputBuffers(packedRecvX.data_ptr(), packedRecvCount.data_ptr<int>(),
+                                     packedRecvSrcInfo.data_ptr<int>(),
+                                     packedRecvLayoutRange.data_ptr<int64_t>());
 
   handle.LaunchDispatch((mori::moe::KernelType)kernelType, blockNum, warpPerBlock,
                         at::cuda::getCurrentHIPStream(), /*enableStandardMoeOutput=*/true);
@@ -437,24 +435,21 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ConvertDi
       static_cast<int64_t>(handle.config.worldSize) * handle.config.maxNumInpTokenPerRank;
   const int64_t hidden = dispatchOutX.size(1);
 
-  auto options = dispatchOutX.options();
-  auto countOptions =
-      torch::TensorOptions().dtype(torch::kInt32).device(dispatchOutX.device());
-  auto layoutOptions =
-      torch::TensorOptions().dtype(torch::kInt64).device(dispatchOutX.device());
+  torch::Tensor packedRecvX =
+      torch::empty({numLocalExperts, maxTokensPerExpert, hidden}, dispatchOutX.options());
+  auto packedRecvSrcInfo =
+      torch::empty({numLocalExperts, handle.config.worldSize * handle.config.maxNumInpTokenPerRank},
+                   torch::dtype(torch::kInt32).device(torch::kCUDA));
+  auto packedRecvLayoutRange = torch::empty({numLocalExperts, handle.config.worldSize},
+                                            torch::dtype(torch::kInt64).device(torch::kCUDA));
+  auto packedRecvCount =
+      torch::empty({numLocalExperts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
 
-  torch::Tensor packedRecvX = torch::empty({numLocalExperts, maxTokensPerExpert, hidden}, options);
-  torch::Tensor packedRecvCount = torch::empty({numLocalExperts}, countOptions);
-  // torch::Tensor packedRecvCount = torch::zeros({numLocalExperts}, countOptions);
-  torch::Tensor packedRecvSrcInfo =
-      torch::empty({numLocalExperts, maxTokensPerExpert}, countOptions);
-  torch::Tensor packedRecvLayoutRange =
-      torch::empty({numLocalExperts, handle.config.worldSize}, layoutOptions);
-
-  handle.LaunchConvertDispatchOutputKernel(
-      dispatchOutX.data_ptr(), dispatchOutTopkIdx.data_ptr(), packedRecvX.data_ptr(),
-      packedRecvCount.data_ptr(), packedRecvSrcInfo.data_ptr(), packedRecvLayoutRange.data_ptr(),
-      blockNum, warpPerBlock, at::cuda::getCurrentHIPStream());
+  handle.LaunchConvertDispatchOutputKernel(dispatchOutX.data_ptr(), dispatchOutTopkIdx.data_ptr(),
+                                           packedRecvX.data_ptr(), packedRecvCount.data_ptr<int>(),
+                                           packedRecvSrcInfo.data_ptr<int>(),
+                                           packedRecvLayoutRange.data_ptr<int64_t>(), blockNum,
+                                           warpPerBlock, at::cuda::getCurrentHIPStream());
 
   return {packedRecvX, packedRecvCount, packedRecvSrcInfo, packedRecvLayoutRange};
 }
