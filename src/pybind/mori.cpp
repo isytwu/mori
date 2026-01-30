@@ -176,15 +176,17 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> LaunchDis
                                         torch::dtype(torch::kInt32).device(torch::kCUDA));
   auto packedRecvLayoutRange = torch::empty({numLocalExperts, handle.config.worldSize},
                                             torch::dtype(torch::kInt64).device(torch::kCUDA));
-  auto packedRecvCount =
-      torch::empty({numLocalExperts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
 
-  handle.SetStandardMoeOutputBuffers(packedRecvX.data_ptr(), packedRecvCount.data_ptr<int>(),
+  handle.SetStandardMoeOutputBuffers(packedRecvX.data_ptr(), handle.standardPackedRecvCount,
                                      packedRecvSrcInfo.data_ptr<int>(),
                                      packedRecvLayoutRange.data_ptr<int64_t>());
 
   handle.LaunchDispatch((mori::moe::KernelType)kernelType, blockNum, warpPerBlock,
                         at::cuda::getCurrentHIPStream(), /*enableStandardMoeOutput=*/true);
+
+  torch::Tensor packedRecvCount =
+      torch::from_blob(handle.standardPackedRecvCount, {numLocalExperts},
+                       torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
   handle.ClearStandardMoeOutputBuffers();
 
@@ -442,14 +444,16 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> ConvertDi
                    torch::dtype(torch::kInt32).device(torch::kCUDA));
   auto packedRecvLayoutRange = torch::empty({numLocalExperts, handle.config.worldSize},
                                             torch::dtype(torch::kInt64).device(torch::kCUDA));
-  auto packedRecvCount =
-      torch::empty({numLocalExperts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
 
   handle.LaunchConvertDispatchOutputKernel(dispatchOutX.data_ptr(), dispatchOutTopkIdx.data_ptr(),
-                                           packedRecvX.data_ptr(), packedRecvCount.data_ptr<int>(),
+                                           packedRecvX.data_ptr(), handle.standardPackedRecvCount,
                                            packedRecvSrcInfo.data_ptr<int>(),
                                            packedRecvLayoutRange.data_ptr<int64_t>(), blockNum,
                                            warpPerBlock, at::cuda::getCurrentHIPStream());
+
+  torch::Tensor packedRecvCount =
+      torch::from_blob(handle.standardPackedRecvCount, {numLocalExperts},
+                       torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
   return {packedRecvX, packedRecvCount, packedRecvSrcInfo, packedRecvLayoutRange};
 }
@@ -486,9 +490,9 @@ torch::Tensor ConvertCombineInput(mori::moe::EpDispatchCombineHandle& handle,
   torch::Tensor combineInput =
       torch::empty({handle.config.MaxNumTokensToRecv(), hidden}, options);
 
-  handle.LaunchConvertCombineInputKernel(
-      packedRecvX.data_ptr(), packedRecvSrcInfo.data_ptr(), packedRecvLayoutRange.data_ptr(),
-      combineInput.data_ptr(), blockNum, warpPerBlock, at::cuda::getCurrentHIPStream());
+  handle.LaunchConvertCombineInputKernel(packedRecvX.data_ptr(), packedRecvSrcInfo.data_ptr(),
+                                         packedRecvLayoutRange.data_ptr(), combineInput.data_ptr(),
+                                         blockNum, warpPerBlock, at::cuda::getCurrentHIPStream());
 
   return combineInput;
 }

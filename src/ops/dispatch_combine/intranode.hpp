@@ -190,12 +190,8 @@ __global__ void EpDispatchIntraNodeKernel(EpDispatchCombineArgs<T> args) {
     }
   }
 
+#ifdef ENABLE_STANDARD_MOE_ADAPT
   if constexpr (EnableStdMoE) {
-    // clear packedRecvCount
-    if (thdId < config.numExpertPerRank) {
-      args.standardPackedRecvCount[thdId] = 0;
-    }
-
     ConvertDispatchOutputArgs convArgs{};
     convArgs.config = args.config;
     convArgs.dispatchOutX = args.shmemDispatchOutTokMemObj->template GetAs<T*>(myPe);
@@ -210,6 +206,7 @@ __global__ void EpDispatchIntraNodeKernel(EpDispatchCombineArgs<T> args) {
     convArgs.dispTokToEpSlotMap = args.dispTokToEpSlotMap;
     ConvertDispatchOutputDevice<false /*IsStandalone*/>(convArgs);
   }
+#endif
 }
 
 /* ---------------------------------------------------------------------------------------------- */

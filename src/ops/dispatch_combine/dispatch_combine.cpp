@@ -216,6 +216,10 @@ void EpDispatchCombineHandle::InitializeOrderMapBuf() {
   const size_t mapSize = maxDispatchTokens * config.numExpertPerToken * sizeof(uint64_t);
   HIP_RUNTIME_CHECK(hipMalloc(&dispTokToEpSlotMap, mapSize));
   HIP_RUNTIME_CHECK(hipMemset(dispTokToEpSlotMap, 0, mapSize));
+
+  // Allocate standard MoE output buffers
+  HIP_RUNTIME_CHECK(hipMalloc(&standardPackedRecvCount, config.numExpertPerRank * sizeof(int)));
+  HIP_RUNTIME_CHECK(hipMemset(standardPackedRecvCount, 0, config.numExpertPerRank * sizeof(int)));
 #endif
 }
 
@@ -233,7 +237,10 @@ void EpDispatchCombineHandle::FinalizeOrderMapBuf() {
   HIP_RUNTIME_CHECK(hipFree(interNodeDispDestTokIdMap));
   HIP_RUNTIME_CHECK(hipFree(blockFlagCounter));
   HIP_RUNTIME_CHECK(hipFree(interNodeDispSendMap));
+#ifdef ENABLE_STANDARD_MOE_ADAPT
   HIP_RUNTIME_CHECK(hipFree(dispTokToEpSlotMap));
+  HIP_RUNTIME_CHECK(hipFree(standardPackedRecvCount));
+#endif
 }
 
 void EpDispatchCombineHandle::InitializeBarrier() {
@@ -420,6 +427,7 @@ void EpDispatchCombineHandle::LaunchConvertCombineInputKernel(const void* packed
   args.totalRecvTokenNum = totalRecvTokenNum;
   args.combineInput = combineOut;
   args.dispTokToEpSlotMap = dispTokToEpSlotMap;
+  args.packedRecvCount = standardPackedRecvCount;
 
   switch (inputType) {
     case HIP_R_32F:

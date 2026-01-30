@@ -145,7 +145,7 @@ class EpDispatchCombineHandle {
                                    int* packedRecvSrcInfo, int64_t* packedRecvLayoutRange) {
     enableStandardMoeOutput = true;
     standardPackedRecvX = packedRecvX;
-    standardPackedRecvCount = packedRecvCount;
+    // standardPackedRecvCount = packedRecvCount;
     standardPackedRecvSrcInfo = packedRecvSrcInfo;
     standardPackedRecvLayoutRange = packedRecvLayoutRange;
   }
@@ -153,7 +153,7 @@ class EpDispatchCombineHandle {
   void ClearStandardMoeOutputBuffers() {
     enableStandardMoeOutput = false;
     standardPackedRecvX = nullptr;
-    standardPackedRecvCount = nullptr;
+    // standardPackedRecvCount = nullptr;
     standardPackedRecvSrcInfo = nullptr;
     standardPackedRecvLayoutRange = nullptr;
   }
@@ -418,12 +418,14 @@ EpDispatchCombineArgs<T> GetEpDispatchCombineArgs(const EpDispatchCombineHandle&
 #ifdef ENABLE_PROFILER
   args.profilerConfig = handle.profilerConfig;
 #endif
+#ifdef ENABLE_STANDARD_MOE_ADAPT
   args.enableStandardMoeOutput = handle.enableStandardMoeOutput;
   args.standardPackedRecvX = handle.standardPackedRecvX;
   args.standardPackedRecvCount = handle.standardPackedRecvCount;
   args.standardPackedRecvSrcInfo = handle.standardPackedRecvSrcInfo;
   args.standardPackedRecvLayoutRange = handle.standardPackedRecvLayoutRange;
   args.dispTokToEpSlotMap = handle.dispTokToEpSlotMap;
+#endif
   return args;
 }
 

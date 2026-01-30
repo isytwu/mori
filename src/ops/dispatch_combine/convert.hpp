@@ -116,10 +116,11 @@ struct ConvertCombineInputArgs {
   const index_t* totalRecvTokenNum{nullptr};
   void* combineInput{nullptr};
   uint64_t* dispTokToEpSlotMap{nullptr};
+  int* packedRecvCount{nullptr};
 };
 #if 1
 // IsStandalone: true if launched as a standalone kernel, false if called from within another kernel
-template <bool IsStandalone = false>
+template <bool IsStandalone = true>
 __device__ inline void ConvertDispatchOutputDevice(ConvertDispatchOutputArgs args) {
   const EpDispatchCombineConfig& config = args.config;
   const int thdId = threadIdx.x;
@@ -148,11 +149,6 @@ __device__ inline void ConvertDispatchOutputDevice(ConvertDispatchOutputArgs arg
   auto* packedRecvCount = args.packedRecvCount;
   (void)args.packedRecvLayoutRange;
   auto* dispTokToEpSlotMap = args.dispTokToEpSlotMap;
-
-  // clear packedRecvCount
-  if (thdId < args.config.numExpertPerRank) {
-    packedRecvCount[thdId] = 0;
-  }
 
   // Only need barrier synchronization when called from within another kernel
   if constexpr (!IsStandalone) {
@@ -424,6 +420,11 @@ __global__ void ConvertCombineInputKernel(ConvertCombineInputArgs args) {
 
   const int64_t totalTokens = static_cast<int64_t>(args.totalRecvTokenNum[0]);
   const int numBlocks = gridDim.x;
+
+  // clear packedRecvCount
+  if (thdId < config.numExpertPerRank) {
+    args.packedRecvCount[thdId] = 0;
+  }
 
   // Each block handles tokens in strided fashion
   for (int64_t tokenIdx = blockIdx.x; tokenIdx < totalTokens; tokenIdx += numBlocks) {
