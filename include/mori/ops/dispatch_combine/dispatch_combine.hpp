@@ -176,8 +176,8 @@ class EpDispatchCombineHandle {
                                          int warpPerBlock = -1, hipStream_t = 0);
   void LaunchConvertCombineInputKernel(const void* packedRecvX, const void* packedRecvSrcInfo,
                                        const void* packedRecvLayoutRange, void* combineInput,
-                                       int blockNum = -1, int warpPerBlock = -1,
-                                       hipStream_t = 0);
+                                       mori::application::SymmMemObjPtr shmemCombineInpTokMemObj,
+                                       int blockNum = -1, int warpPerBlock = -1, hipStream_t = 0);
 
   index_t GetCurRankNumToken() const { return curRankNumToken; }
 

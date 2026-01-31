@@ -488,11 +488,13 @@ torch::Tensor ConvertCombineInput(mori::moe::EpDispatchCombineHandle& handle,
 
   auto options = packedRecvX.options();
   torch::Tensor combineInput =
-      torch::empty({handle.config.MaxNumTokensToRecv(), hidden}, options);
+      torch::from_blob(handle.shmemCombineInpTokMemObj->Get(),
+                       {handle.config.MaxNumTokensToRecv(), hidden}, options);
 
-  handle.LaunchConvertCombineInputKernel(packedRecvX.data_ptr(), packedRecvSrcInfo.data_ptr(),
-                                         packedRecvLayoutRange.data_ptr(), combineInput.data_ptr(),
-                                         blockNum, warpPerBlock, at::cuda::getCurrentHIPStream());
+  handle.LaunchConvertCombineInputKernel(
+      packedRecvX.data_ptr(), packedRecvSrcInfo.data_ptr(), packedRecvLayoutRange.data_ptr(),
+      combineInput.data_ptr(), handle.shmemCombineInpTokMemObj, blockNum, warpPerBlock,
+      at::cuda::getCurrentHIPStream());
 
   return combineInput;
 }

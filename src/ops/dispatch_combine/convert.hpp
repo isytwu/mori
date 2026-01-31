@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstdint>
+#include <iterator>
 
 #include <hip/hip_fp16.h>
 
@@ -117,6 +118,8 @@ struct ConvertCombineInputArgs {
   void* combineInput{nullptr};
   uint64_t* dispTokToEpSlotMap{nullptr};
   int* packedRecvCount{nullptr};
+  mori::application::SymmMemObjPtr shmemCombineInpTokMemObj;
+  mori::application::SymmMemObjPtr dispTokIdToSrcTokIdMemObj;
 };
 #if 1
 // IsStandalone: true if launched as a standalone kernel, false if called from within another kernel
@@ -395,8 +398,8 @@ __global__ void ConvertCombineInputKernel(ConvertCombineInputArgs args) {
 #else
 // Block-per-token implementation: each block processes one token,
 // each thread reduces one vector element across all top-k experts
-template <typename T>
-__global__ void ConvertCombineInputKernel(ConvertCombineInputArgs args) {
+template <typename T, bool UseP2PRead>
+__device__ inline void ConvertCombineInputDevice(ConvertCombineInputArgs& args) {
   const EpDispatchCombineConfig& config = args.config;
   const int thdId = threadIdx.x;
   const int warpId = thdId / warpSize;
@@ -408,6 +411,7 @@ __global__ void ConvertCombineInputKernel(ConvertCombineInputArgs args) {
 
   const int topk = config.numExpertPerToken;
   const int64_t hiddenDim = config.hiddenDim;
+  const int64_t hiddenBytes = config.hiddenDim * sizeof(T);
 
   // Number of T elements per vector load (int4 = 16 bytes)
   constexpr int kElemsPerVec = sizeof(int4) / sizeof(T);
@@ -415,7 +419,7 @@ __global__ void ConvertCombineInputKernel(ConvertCombineInputArgs args) {
 
   auto* dispTokToEpSlotMap = args.dispTokToEpSlotMap;
   const auto* packedRecvX = reinterpret_cast<const T*>(args.packedRecvX);
-  auto* convertOutput = reinterpret_cast<T*>(args.combineInput);
+  // auto* convertOutput = reinterpret_cast<T*>(args.combineInput);
   const auto* topkWeights = reinterpret_cast<const float*>(args.topkWeights);
 
   const int64_t totalTokens = static_cast<int64_t>(args.totalRecvTokenNum[0]);
@@ -431,6 +435,18 @@ __global__ void ConvertCombineInputKernel(ConvertCombineInputArgs args) {
     // Load top-k slot indices for this token
     uint64_t slots[MAX_EXPERTS_PER_TOKEN];
     float weights[MAX_EXPERTS_PER_TOKEN];
+    uint8_t* out;
+    if constexpr (UseP2PRead) {
+      out = args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>() + tokenIdx * hiddenBytes;
+    }
+    else {
+      index_t destTokId =
+          args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(config.rank)[tokenIdx];
+      index_t destPe = destTokId / config.MaxNumTokensToRecvPerRank();
+      index_t destLocalTokId = destTokId - destPe * config.MaxNumTokensToRecvPerRank();
+      out = args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(destPe) +
+            (config.rank * config.MaxNumTokensToRecvPerRank() + destLocalTokId) * hiddenBytes;
+    }
 #pragma unroll
     for (int k = 0; k < topk; ++k) {
       slots[k] = dispTokToEpSlotMap[tokenIdx * topk + k];
@@ -464,14 +480,20 @@ __global__ void ConvertCombineInputKernel(ConvertCombineInputArgs args) {
       for (int e = 0; e < kElemsPerVec; ++e) {
         outElems[e] = static_cast<T>(accum[e]);
       }
-      reinterpret_cast<int4*>(convertOutput + tokenIdx * hiddenDim)[vecIdx] = outVec;
+      // reinterpret_cast<int4*>(convertOutput + tokenIdx * hiddenDim)[vecIdx] = outVec;
+      reinterpret_cast<int4*>(out)[vecIdx] = outVec;
     }
 
     PROFILE_COMBINE_RECORD(ts, tsCount, kTsMax, laneId);
   }
 
   PROFILE_COMBINE_PRINT(config.rank == 0 && blockIdx.x == 0 && warpId == 0 && laneId == 0,
-                        "ConvertCombineInputKernel", ts, tsCount);
+                        "ConvertCombineInputDevice", ts, tsCount);
+}
+
+template <typename T, bool UseP2PRead = true>
+__global__ void ConvertCombineInputKernel(ConvertCombineInputArgs args) {
+  ConvertCombineInputDevice<T, UseP2PRead>(args);
 }
 #endif
 

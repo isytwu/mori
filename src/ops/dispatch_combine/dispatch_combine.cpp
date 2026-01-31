@@ -365,6 +365,7 @@ void EpDispatchCombineHandle::LaunchCombine(KernelType kernelType, int blockNum,
           EpCombineInterNodeV1KernelLowLatency<<<grid, block, sharedMemSize, stream>>>(args);
           EpCombineAll<<<this->multiProcessorCount, block, sharedMemSize, stream>>>(args);
         } else if (kernelType == KernelType::IntraNode) {
+#ifndef ENABLE_STANDARD_MOE_ADAPT
           if (config.useExternalInpBuffer) {
             // UseP2PRead=false: does not support zero-copy and provides better bandwidth and lower
             // latency
@@ -372,6 +373,9 @@ void EpDispatchCombineHandle::LaunchCombine(KernelType kernelType, int blockNum,
           } else {  // zero-copy mode (requires UseP2PRead=true)
             EpCombineIntraNodeKernel<DataT, true><<<grid, block, sharedMemSize, stream>>>(args);
           }
+#else
+          EpCombineIntraNodeKernel<DataT, true><<<grid, block, sharedMemSize, stream>>>(args);
+#endif
         } else {
           assert(false);
         }
@@ -407,12 +411,10 @@ void EpDispatchCombineHandle::LaunchConvertDispatchOutputKernel(const void* disp
   ConvertDispatchOutputKernel<<<grid, block, 0, stream>>>(args);
 }
 
-void EpDispatchCombineHandle::LaunchConvertCombineInputKernel(const void* packedRecvX,
-                                                              const void* packedRecvSrcInfo,
-                                                              const void* packedRecvLayoutRange,
-                                                              void* combineOut, int blockNum,
-                                                              int warpPerBlock,
-                                                              hipStream_t stream) {
+void EpDispatchCombineHandle::LaunchConvertCombineInputKernel(
+    const void* packedRecvX, const void* packedRecvSrcInfo, const void* packedRecvLayoutRange,
+    void* combineInput, mori::application::SymmMemObjPtr shmemCombineInpTokMemObj, int blockNum,
+    int warpPerBlock, hipStream_t stream) {
   size_t actualWarpNumPerBlock = (warpPerBlock <= 0) ? config.warpNumPerBlock : warpPerBlock;
   dim3 grid((blockNum <= 0) ? config.blockNum : blockNum);
   dim3 block(warpSize * actualWarpNumPerBlock);
@@ -425,7 +427,9 @@ void EpDispatchCombineHandle::LaunchConvertCombineInputKernel(const void* packed
   args.packedRecvSrcInfo = packedRecvSrcInfo;
   args.packedRecvLayoutRange = packedRecvLayoutRange;
   args.totalRecvTokenNum = totalRecvTokenNum;
-  args.combineInput = combineOut;
+  args.combineInput = combineInput;
+  args.shmemCombineInpTokMemObj = shmemCombineInpTokMemObj;
+  args.dispTokIdToSrcTokIdMemObj = dispTokIdToSrcTokIdMemObj;
   args.dispTokToEpSlotMap = dispTokToEpSlotMap;
   args.packedRecvCount = standardPackedRecvCount;
 

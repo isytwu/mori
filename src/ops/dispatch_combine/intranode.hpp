@@ -239,13 +239,14 @@ __global__ void EpCombineIntraNodeKernel(EpDispatchCombineArgs<T> args) {
       (args.weightsBuf == nullptr) ? 0 : config.numExpertPerToken * sizeof(float);
   const size_t combXferBytes = hiddenBytes + weightBytes;
   if constexpr (UseP2PRead) {
+#ifndef ENABLE_STANDARD_MOE_ADAPT
     if (args.config.useExternalInpBuffer) {
       for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) {
         core::WarpCopy(args.shmemCombineInpTokMemObj->template GetAs<T*>() + i * config.hiddenDim,
                        args.inpTokenBuf + i * config.hiddenDim, config.hiddenDim);
       }
     }
-
+#endif
     if (args.weightsBuf) {
       for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) {
         core::WarpCopy(
