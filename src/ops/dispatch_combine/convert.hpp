@@ -184,6 +184,7 @@ __device__ inline void ConvertDispatchOutputDevice(ConvertDispatchOutputArgs arg
       }
       continue;
     }
+    PROFILE_DISPATCH_RECORD(ts, tsCount, kTsMax, laneId);
 
     // const index_t srcTokenPos = dispatchSrcTokenPos[tokenIdx];
     // const int srcRank = static_cast<int>(srcTokenPos / maxNumTokenPerRank);
@@ -217,6 +218,9 @@ __device__ inline void ConvertDispatchOutputDevice(ConvertDispatchOutputArgs arg
                          "ConvertDispatchOutputDevice", ts, tsCount);
 }
 #else
+// IsStandalone: true if launched as a standalone kernel, false if called from within another kernel
+// Optimized version: blocks are partitioned by expert, each block group handles one local expert
+template <bool IsStandalone = true>
 __device__ inline void ConvertDispatchOutputDevice(ConvertDispatchOutputArgs args) {
   const EpDispatchCombineConfig& config = args.config;
   const int thdId = threadIdx.x;
@@ -224,16 +228,13 @@ __device__ inline void ConvertDispatchOutputDevice(ConvertDispatchOutputArgs arg
   const int laneId = thdId & (warpSize - 1);
   const int warpNum = blockDim.x / warpSize;
 
-  constexpr int kTsMax = 12;
+  constexpr int kTsMax = 20;
   PROFILE_DISPATCH_DECL(kTsMax);
   PROFILE_DISPATCH_RECORD(ts, tsCount, kTsMax, laneId);
 
-  const int globalWarpId = blockIdx.x * warpNum + warpId;
-  const int globalWarpNum = gridDim.x * warpNum;
-
   const int topk = config.numExpertPerToken;
+  const int numExperts = config.numExpertPerRank;
 
-  const int64_t maxNumTokenPerRank = config.maxNumInpTokenPerRank;
   const int64_t maxTokensPerExpert =
       static_cast<int64_t>(config.worldSize) * config.maxNumInpTokenPerRank;
   const size_t hiddenBytes = static_cast<size_t>(config.hiddenDim) * config.maxTokenTypeSize;
@@ -246,98 +247,94 @@ __device__ inline void ConvertDispatchOutputDevice(ConvertDispatchOutputArgs arg
   (void)args.packedRecvLayoutRange;
   auto* dispTokToEpSlotMap = args.dispTokToEpSlotMap;
 
-  if (thdId < args.config.numExpertPerRank) {
-    packedRecvCount[thdId] = 0;
-  }
-
-  uint32_t* dispatchGridBarrier = args.dispatchGridBarrier + 1;
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    __threadfence();
-    __hip_atomic_fetch_add(dispatchGridBarrier, 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-  }
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    while (atomicCAS(dispatchGridBarrier, gridDim.x, 0) != 0) {
-      __builtin_amdgcn_s_sleep(1);
+  // Only need barrier synchronization when called from within another kernel
+  if constexpr (!IsStandalone) {
+    uint32_t* dispatchGridBarrier = args.dispatchGridBarrier + 1;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      __threadfence();
+      volatile int ret = __hip_atomic_fetch_add(dispatchGridBarrier, 1, __ATOMIC_RELAXED,
+                                                __HIP_MEMORY_SCOPE_AGENT);
     }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      while (atomicCAS(dispatchGridBarrier, gridDim.x, 0) != 0) {
+        __builtin_amdgcn_s_sleep(1);
+      }
+    }
+    __syncthreads();
   }
-  __syncthreads();
 
   PROFILE_DISPATCH_RECORD(ts, tsCount, kTsMax, laneId);
 
   const int64_t totalTokens = static_cast<int64_t>(args.totalRecvTokenNum[0]);
-  for (int i = globalWarpId; i < totalTokens * topk; i += globalWarpNum) {
-    auto tokenIdx = i / topk;
-    const index_t expertId = topkIdx[i];
-    const auto localExpert = expertId - config.rank * config.numExpertPerRank;
-    if (localExpert < 0 || localExpert >= config.numExpertPerRank) {
-      if (laneId == 0) {
-        // TODO: do not use -1
-        dispTokToEpSlotMap[i] = static_cast<uint64_t>(-1);
-      }
-    } else {
-      if (laneId == 0) {
-        uint32_t idx = atomicAdd(packedRecvCount + localExpert, 1u);
-        const uint64_t linearIndex = static_cast<uint64_t>(localExpert) * maxTokensPerExpert + idx;
-        packedRecvSrcInfo[linearIndex] = tokenIdx;
-        dispTokToEpSlotMap[i] = linearIndex;
+
+  // Block assignment: divide blocks evenly among local experts
+  // Each group of blocks handles one local expert
+  const int blocksPerExpert = gridDim.x / numExperts;
+  const int localExpertId = blockIdx.x / blocksPerExpert;
+
+  // Skip if this block maps to a non-existent expert (when gridDim.x not divisible by numExperts)
+  if (localExpertId >= numExperts || blocksPerExpert == 0) {
+    return;
+  }
+
+  const int blockInGroup = blockIdx.x % blocksPerExpert;
+
+  // Global expert ID that this block group is responsible for
+  const index_t targetExpertId = static_cast<index_t>(config.rank * numExperts + localExpertId);
+
+  // Warp ID within this expert's block group
+  const int groupWarpId = blockInGroup * warpNum + warpId;
+  const int groupWarpNum = blocksPerExpert * warpNum;
+
+  // Each warp processes tokens (rows of topkIdx) in strided fashion
+  for (int64_t tokenIdx = groupWarpId; tokenIdx < totalTokens; tokenIdx += groupWarpNum) {
+    // First topk threads read topkIdx for this token in parallel
+    index_t myExpertId = laneId < topk ? topkIdx[tokenIdx * topk + laneId] : 0;
+    if (laneId < topk) {
+      // Check if this is a non-local expert and set -1 (only first group handles)
+      if (localExpertId == 0) {
+        const auto localExpert = myExpertId - config.rank * numExperts;
+        if (localExpert < 0 || localExpert >= numExperts) {
+          dispTokToEpSlotMap[tokenIdx * topk + laneId] = static_cast<uint64_t>(-1);
+        }
       }
     }
-  }
 
-  PROFILE_DISPATCH_RECORD(ts, tsCount, kTsMax, laneId);
-
-  dispatchGridBarrier = args.dispatchGridBarrier + 2;
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    __threadfence();
-    __hip_atomic_fetch_add(dispatchGridBarrier, 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-  }
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    while (atomicCAS(dispatchGridBarrier, gridDim.x, 0) != 0) {
-      __builtin_amdgcn_s_sleep(1);
+    // Check if this lane's expert matches our target, use ballot to determine if copy needed
+    const bool isMatch = laneId < topk && (myExpertId == targetExpertId);
+    const uint64_t matchMask = __ballot(isMatch);
+    if (matchMask == 0) {
+      continue;
     }
-  }
-  __syncthreads();
 
-  const int numExperts = config.numExpertPerRank;
-  const int baseBlocks = gridDim.x / numExperts;
-  const int extraBlocks = gridDim.x - baseBlocks * numExperts;
-  const int groupSize = baseBlocks + 1;
-  const int cutoff = extraBlocks * groupSize;
-  const int expert = (blockIdx.x < cutoff)
-                         ? (blockIdx.x / groupSize)
-                         : (extraBlocks + (blockIdx.x - cutoff) / baseBlocks);
-  const int blockInExpert =
-      (blockIdx.x < cutoff) ? (blockIdx.x % groupSize) : ((blockIdx.x - cutoff) % baseBlocks);
-  const int blocksPerExpert = baseBlocks + ((expert < extraBlocks) ? 1 : 0);
-
-  auto expertRecvCount = packedRecvCount[expert];
-  // if (laneId == 0 && warpId == 0 && blockInExpert == 0 && config.rank == 0) {
-  //   printf("[ConvertDispatchOutputDevice] rank=%d expert=%d recv=%u\n", config.rank, expert,
-  //          static_cast<unsigned int>(expertRecvCount));
-  // }
-  for (int idx = blockInExpert * warpNum + warpId; idx < expertRecvCount;
-       idx += blocksPerExpert * warpNum) {
     PROFILE_DISPATCH_RECORD(ts, tsCount, kTsMax, laneId);
-    const uint64_t linearIndex = static_cast<uint64_t>(expert) * maxTokensPerExpert + idx;
-    const size_t dstOffset = static_cast<size_t>(linearIndex) * hiddenBytes;
-    index_t tokenIdx = 0;
-    if (laneId == 0) {
-      tokenIdx = packedRecvSrcInfo[linearIndex];
-    }
-    tokenIdx = __shfl(tokenIdx, 0);
-    const size_t srcOffset = static_cast<size_t>(tokenIdx) * hiddenBytes;
-    // const size_t srcOffset = static_cast<size_t>(packedRecvSrcInfo[linearIndex]) * hiddenBytes;
-    const auto* srcBytes = reinterpret_cast<const uint8_t*>(args.dispatchOutX) + srcOffset;
-    auto* dstBytes = packedRecvX + dstOffset;
-    core::WarpCopy<uint8_t, 7>(dstBytes, srcBytes, hiddenBytes);
 
+    // This token goes to our target expert, do the copy
+    uint32_t idx = 0;
+    if (laneId == 0) {
+      idx = atomicAdd(packedRecvCount + localExpertId, 1u);
+    }
+    idx = __shfl(idx, 0);
+
+    const uint64_t linearIndex = static_cast<uint64_t>(localExpertId) * maxTokensPerExpert + idx;
+
+    // Set dispTokToEpSlotMap for the matching lane(s)
+    if (isMatch) {
+      dispTokToEpSlotMap[tokenIdx * topk + laneId] = linearIndex;
+    }
+
+    // Set packedRecvSrcInfo (only lane 0)
     if (laneId == 0) {
       packedRecvSrcInfo[linearIndex] = dispatchSrcTokenPos[tokenIdx];
     }
+
+    const size_t dstOffset = static_cast<size_t>(linearIndex) * hiddenBytes;
+    const size_t srcOffset = static_cast<size_t>(tokenIdx) * hiddenBytes;
+    const auto* srcBytes = reinterpret_cast<const uint8_t*>(args.dispatchOutX) + srcOffset;
+    auto* dstBytes = packedRecvX + dstOffset;
+    core::WarpCopy<uint8_t, 7>(dstBytes, srcBytes, hiddenBytes);
 
     PROFILE_DISPATCH_RECORD(ts, tsCount, kTsMax, laneId);
   }
