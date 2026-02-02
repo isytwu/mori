@@ -166,7 +166,8 @@ class EpDispatchCombineHandle {
 
   void LaunchDispatch(KernelType, int blockNum = -1, int warpPerBlock = -1, hipStream_t = 0,
                       bool enableStandardMoeOutput = false);
-  void LaunchCombine(KernelType, int blockNum = -1, int warpPerBlock = -1, hipStream_t = 0);
+  void LaunchCombine(KernelType, int blockNum = -1, int warpPerBlock = -1, hipStream_t = 0,
+                     bool enableStandardMoeInput = false);
   void LaunchReset(hipStream_t = 0);
 
   void LaunchConvertDispatchOutputKernel(const void* dispatchOutX, const void* dispatchOutTopkIdx,

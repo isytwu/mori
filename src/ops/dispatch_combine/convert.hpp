@@ -121,6 +121,69 @@ struct ConvertCombineInputArgs {
   mori::application::SymmMemObjPtr shmemCombineInpTokMemObj;
   mori::application::SymmMemObjPtr dispTokIdToSrcTokIdMemObj;
 };
+
+// Grid barrier: synchronize all blocks within a grid
+// All threads in all blocks must call this function
+template <typename T>
+__device__ inline void GridBarrier(T* barrierPtr) {
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    __threadfence();
+    __hip_atomic_fetch_add(barrierPtr, static_cast<T>(1), __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    while (atomicCAS(barrierPtr, static_cast<T>(gridDim.x), static_cast<T>(0)) != 0) {
+      __builtin_amdgcn_s_sleep(1);
+    }
+  }
+  __syncthreads();
+}
+
+// Forward declarations
+template <bool IsStandalone>
+__device__ inline void ConvertDispatchOutputDevice(ConvertDispatchOutputArgs args);
+
+template <typename T, bool UseP2PRead>
+__device__ inline void ConvertCombineInputDevice(ConvertCombineInputArgs& args);
+
+// Helper to invoke ConvertDispatchOutputDevice from EpDispatchCombineArgs
+template <typename T>
+__device__ inline void InvokeConvertDispatchOutput(const EpDispatchCombineArgs<T>& args, int myPe) {
+  ConvertDispatchOutputArgs convArgs{};
+  convArgs.config = args.config;
+  convArgs.dispatchOutX = args.shmemDispatchOutTokMemObj->template GetAs<T*>(myPe);
+  convArgs.dispatchOutTopkIdx = args.shmemOutIndicesMemObj->template GetAs<index_t*>(myPe);
+  convArgs.dispatchSrcTokenPos = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe);
+  convArgs.totalRecvTokenNum = args.totalRecvTokenNum;
+  convArgs.dispatchGridBarrier = args.dispatchGridBarrier;
+  convArgs.packedRecvX = args.standardPackedRecvX;
+  convArgs.packedRecvCount = args.standardPackedRecvCount;
+  convArgs.packedRecvSrcInfo = args.standardPackedRecvSrcInfo;
+  convArgs.packedRecvLayoutRange = args.standardPackedRecvLayoutRange;
+  convArgs.dispTokToEpSlotMap = args.dispTokToEpSlotMap;
+  ConvertDispatchOutputDevice</*IsStandalone=*/false>(convArgs);
+}
+
+// Helper to invoke ConvertCombineInputDevice from EpDispatchCombineArgs
+template <typename T, bool UseP2PRead>
+__device__ inline void InvokeConvertCombineInput(const EpDispatchCombineArgs<T>& args, int myPe) {
+  ConvertCombineInputArgs convArgs{};
+  convArgs.config = args.config;
+  convArgs.packedRecvX = args.standardPackedRecvX;
+  convArgs.topkIdx = args.tokenIndices;
+  convArgs.topkWeights = args.shmemDispatchOutWeightsMemObj->template GetAs<float*>(myPe);
+  convArgs.packedRecvSrcInfo = args.standardPackedRecvSrcInfo;
+  convArgs.packedRecvLayoutRange = args.standardPackedRecvLayoutRange;
+  convArgs.totalRecvTokenNum = args.totalRecvTokenNum;
+  convArgs.combineInput = nullptr;
+  convArgs.dispTokToEpSlotMap = args.dispTokToEpSlotMap;
+  convArgs.packedRecvCount = args.standardPackedRecvCount;
+  convArgs.shmemCombineInpTokMemObj = args.shmemCombineInpTokMemObj;
+  convArgs.dispTokIdToSrcTokIdMemObj = args.dispTokIdToSrcTokIdMemObj;
+  ConvertCombineInputDevice<T, UseP2PRead>(convArgs);
+}
+
 #if 1
 // IsStandalone: true if launched as a standalone kernel, false if called from within another kernel
 template <bool IsStandalone = true>
@@ -155,20 +218,7 @@ __device__ inline void ConvertDispatchOutputDevice(ConvertDispatchOutputArgs arg
 
   // Only need barrier synchronization when called from within another kernel
   if constexpr (!IsStandalone) {
-    uint32_t* dispatchGridBarrier = args.dispatchGridBarrier + 1;
-    __syncthreads();
-    if (threadIdx.x == 0) {
-      __threadfence();
-      volatile int ret =
-          __hip_atomic_fetch_add(dispatchGridBarrier, 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-      while (atomicCAS(dispatchGridBarrier, gridDim.x, 0) != 0) {
-        __builtin_amdgcn_s_sleep(1);
-      }
-    }
-    __syncthreads();
+    GridBarrier(args.dispatchGridBarrier + 1);
   }
 
   PROFILE_DISPATCH_RECORD(ts, tsCount, kTsMax, laneId);
@@ -176,7 +226,8 @@ __device__ inline void ConvertDispatchOutputDevice(ConvertDispatchOutputArgs arg
   const int64_t totalTokens = static_cast<int64_t>(args.totalRecvTokenNum[0]);
   for (int i = globalWarpId; i < totalTokens * topk; i += globalWarpNum) {
     auto tokenIdx = i / topk;
-    const index_t expertId = topkIdx[i];
+    // const index_t expertId = topkIdx[i];
+    const index_t expertId = __ldg(topkIdx + i);
     const auto localExpert = expertId - config.rank * config.numExpertPerRank;
     if (localExpert < 0 || localExpert >= config.numExpertPerRank) {
       if (laneId == 0) {
@@ -193,6 +244,8 @@ __device__ inline void ConvertDispatchOutputDevice(ConvertDispatchOutputArgs arg
     uint32_t idx = 0;
     if (laneId == 0) {
       idx = atomicAdd(packedRecvCount + localExpert, 1u);
+      // idx = __hip_atomic_fetch_add(packedRecvCount + localExpert, 1u, __ATOMIC_RELAXED,
+      //                              __HIP_MEMORY_SCOPE_AGENT);
     }
     idx = __shfl(idx, 0);
 
@@ -249,20 +302,7 @@ __device__ inline void ConvertDispatchOutputDevice(ConvertDispatchOutputArgs arg
 
   // Only need barrier synchronization when called from within another kernel
   if constexpr (!IsStandalone) {
-    uint32_t* dispatchGridBarrier = args.dispatchGridBarrier + 1;
-    __syncthreads();
-    if (threadIdx.x == 0) {
-      __threadfence();
-      volatile int ret = __hip_atomic_fetch_add(dispatchGridBarrier, 1, __ATOMIC_RELAXED,
-                                                __HIP_MEMORY_SCOPE_AGENT);
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-      while (atomicCAS(dispatchGridBarrier, gridDim.x, 0) != 0) {
-        __builtin_amdgcn_s_sleep(1);
-      }
-    }
-    __syncthreads();
+    GridBarrier(args.dispatchGridBarrier + 1);
   }
 
   PROFILE_DISPATCH_RECORD(ts, tsCount, kTsMax, laneId);

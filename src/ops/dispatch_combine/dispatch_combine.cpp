@@ -340,7 +340,7 @@ void EpDispatchCombineHandle::LaunchDispatch(KernelType kernelType, int blockNum
 }
 
 void EpDispatchCombineHandle::LaunchCombine(KernelType kernelType, int blockNum, int warpPerBlock,
-                                            hipStream_t stream) {
+                                            hipStream_t stream, bool enableStandardMoeInput) {
   size_t actualWarpNumPerBlock = (warpPerBlock <= 0) ? config.warpNumPerBlock : warpPerBlock;
   dim3 grid((blockNum <= 0) ? config.blockNum : blockNum);
   dim3 block(warpSize * actualWarpNumPerBlock);
@@ -369,12 +369,21 @@ void EpDispatchCombineHandle::LaunchCombine(KernelType kernelType, int blockNum,
           if (config.useExternalInpBuffer) {
             // UseP2PRead=false: does not support zero-copy and provides better bandwidth and lower
             // latency
-            EpCombineIntraNodeKernel<DataT, false><<<grid, block, sharedMemSize, stream>>>(args);
+            EpCombineIntraNodeKernel<DataT, /*UseP2PRead=*/false>
+                <<<grid, block, sharedMemSize, stream>>>(args);
           } else {  // zero-copy mode (requires UseP2PRead=true)
-            EpCombineIntraNodeKernel<DataT, true><<<grid, block, sharedMemSize, stream>>>(args);
+            EpCombineIntraNodeKernel<DataT, /*UseP2PRead=*/true>
+                <<<grid, block, sharedMemSize, stream>>>(args);
           }
 #else
-          EpCombineIntraNodeKernel<DataT, true><<<grid, block, sharedMemSize, stream>>>(args);
+          if (enableStandardMoeInput) {
+            // Standard MoE mode: convert packed expert output to shmem format first
+            EpCombineIntraNodeKernel<DataT, /*UseP2PRead=*/true, /*EnableStdMoE=*/true>
+                <<<grid, block, sharedMemSize, stream>>>(args);
+          } else {
+            EpCombineIntraNodeKernel<DataT, /*UseP2PRead=*/true, /*EnableStdMoE=*/false>
+                <<<grid, block, sharedMemSize, stream>>>(args);
+          }
 #endif
         } else {
           assert(false);

@@ -193,6 +193,60 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> LaunchDis
   return {packedRecvX, packedRecvCount, packedRecvSrcInfo, packedRecvLayoutRange};
 }
 
+// Standard MoE combine: takes expert output in packed format and combines back
+std::tuple<torch::Tensor, std::optional<torch::Tensor>> LaunchCombineForStandardMoE(
+    mori::moe::EpDispatchCombineHandle& handle, int kernelType,
+    const torch::Tensor& expertOutput,  // [numLocalExperts, maxTokensPerExpert, hidden]
+    const std::optional<torch::Tensor>& weights,
+    const torch::Tensor& topkIds,
+    int blockNum = -1, int warpPerBlock = -1) {
+  assert(expertOutput.is_contiguous() && topkIds.is_contiguous());
+
+  float* weightsPtr = nullptr;
+  if (weights.has_value() && weights->numel() > 0) {
+    assert(weights->is_contiguous() && weights->element_size() == sizeof(float));
+    weightsPtr = weights->data_ptr<float>();
+  }
+
+  // Prepare inference with expert output as input
+  handle.PrepareInference(mori::ScalarTypeToHipDataType(expertOutput.scalar_type()),
+                          nullptr,  // inpTokenBuf not used for standard moe combine
+                          nullptr,  // outTokenBuf
+                          weightsPtr,
+                          topkIds.data_ptr<mori::moe::index_t>(),
+                          handle.curRankNumToken);
+
+  // Set standard MoE input buffers (reusing output buffer fields)
+  handle.SetStandardMoeOutputBuffers(
+      expertOutput.data_ptr(),
+      handle.standardPackedRecvCount,
+      handle.standardPackedRecvSrcInfo,
+      handle.standardPackedRecvLayoutRange);
+
+  // Launch combine with enableStandardMoeInput=true
+  handle.LaunchCombine((mori::moe::KernelType)kernelType, blockNum, warpPerBlock,
+                       at::cuda::getCurrentHIPStream(), /*enableStandardMoeInput=*/true);
+
+  // Get output tensor from shmem buffer
+  auto options = torch::TensorOptions().dtype(expertOutput.scalar_type()).device(torch::kCUDA);
+  torch::Tensor out =
+      torch::from_blob(handle.shmemCombineOutTokMemObj->Get(),
+                       {handle.config.maxNumInpTokenPerRank, handle.config.hiddenDim}, options);
+
+  std::optional<torch::Tensor> outWeights{std::nullopt};
+  // TODO: do not support weights for standard MoE now
+  // if (weightsPtr) {
+  //   outWeights =
+  //       torch::from_blob(handle.shmemCombineOutWeightsMemObj->Get(),
+  //                        {handle.config.maxNumInpTokenPerRank, handle.config.numExpertPerToken},
+  //                        torch::TensorOptions().dtype(weights->scalar_type()).device(torch::kCUDA));
+  // }
+
+  handle.ClearStandardMoeOutputBuffers();
+
+  return {out, outWeights};
+}
+
 void LaunchReset(mori::moe::EpDispatchCombineHandle& handle) {
   handle.LaunchReset(at::cuda::getCurrentHIPStream());
 }
@@ -487,6 +541,7 @@ torch::Tensor ConvertCombineInput(mori::moe::EpDispatchCombineHandle& handle,
   // totalTokens comes from handle.totalRecvTokenNum inside the kernel
 
   auto options = packedRecvX.options();
+  // torch::Tensor combineInput = torch::empty({handle.config.MaxNumTokensToRecv(), hidden}, options);
   torch::Tensor combineInput =
       torch::from_blob(handle.shmemCombineInpTokMemObj->Get(),
                        {handle.config.MaxNumTokensToRecv(), hidden}, options);
@@ -554,11 +609,14 @@ void DeclareEpDispatchCombineHandle(pybind11::module& m) {
   std::string funcName = std::string("launch_dispatch");
   m.def(funcName.c_str(), &LaunchDispatch);
 
+  funcName = std::string("launch_combine");
+  m.def(funcName.c_str(), &LaunchCombine);
+
   funcName = std::string("launch_dispatch_standard_moe");
   m.def(funcName.c_str(), &LaunchDispatchForStandardMoE);
 
-  funcName = std::string("launch_combine");
-  m.def(funcName.c_str(), &LaunchCombine);
+  funcName = std::string("launch_combine_standard_moe");
+  m.def(funcName.c_str(), &LaunchCombineForStandardMoE);
 
   funcName = std::string("convert_dispatch_output");
   m.def(funcName.c_str(), &ConvertDispatchOutput);

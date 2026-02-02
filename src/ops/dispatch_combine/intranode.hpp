@@ -192,19 +192,7 @@ __global__ void EpDispatchIntraNodeKernel(EpDispatchCombineArgs<T> args) {
 
 #ifdef ENABLE_STANDARD_MOE_ADAPT
   if constexpr (EnableStdMoE) {
-    ConvertDispatchOutputArgs convArgs{};
-    convArgs.config = args.config;
-    convArgs.dispatchOutX = args.shmemDispatchOutTokMemObj->template GetAs<T*>(myPe);
-    convArgs.dispatchOutTopkIdx = args.shmemOutIndicesMemObj->template GetAs<index_t*>(myPe);
-    convArgs.dispatchSrcTokenPos = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe);
-    convArgs.totalRecvTokenNum = args.totalRecvTokenNum;
-    convArgs.dispatchGridBarrier = args.dispatchGridBarrier;
-    convArgs.packedRecvX = args.standardPackedRecvX;
-    convArgs.packedRecvCount = args.standardPackedRecvCount;
-    convArgs.packedRecvSrcInfo = args.standardPackedRecvSrcInfo;
-    convArgs.packedRecvLayoutRange = args.standardPackedRecvLayoutRange;
-    convArgs.dispTokToEpSlotMap = args.dispTokToEpSlotMap;
-    ConvertDispatchOutputDevice<false /*IsStandalone*/>(convArgs);
+    InvokeConvertDispatchOutput<T>(args, myPe);
   }
 #endif
 }
@@ -212,7 +200,7 @@ __global__ void EpDispatchIntraNodeKernel(EpDispatchCombineArgs<T> args) {
 /* ---------------------------------------------------------------------------------------------- */
 /*                                    EpCombineIntraNodeKernel                                    */
 /* ---------------------------------------------------------------------------------------------- */
-template <typename T, bool UseP2PRead = true>
+template <typename T, bool UseP2PRead = true, bool EnableStdMoE = false>
 __global__ void EpCombineIntraNodeKernel(EpDispatchCombineArgs<T> args) {
   const EpDispatchCombineConfig& config = args.config;
   int thdId = threadIdx.x;
@@ -238,39 +226,44 @@ __global__ void EpCombineIntraNodeKernel(EpDispatchCombineArgs<T> args) {
   const size_t weightBytes =
       (args.weightsBuf == nullptr) ? 0 : config.numExpertPerToken * sizeof(float);
   const size_t combXferBytes = hiddenBytes + weightBytes;
-  if constexpr (UseP2PRead) {
+
+  // If EnableStdMoE, call ConvertCombineInputDevice first to convert standard MoE format
+  if constexpr (EnableStdMoE) {
+    InvokeConvertCombineInput<T, UseP2PRead>(args, myPe);
+  }
 #ifndef ENABLE_STANDARD_MOE_ADAPT
-    if (args.config.useExternalInpBuffer) {
-      for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) {
-        core::WarpCopy(args.shmemCombineInpTokMemObj->template GetAs<T*>() + i * config.hiddenDim,
-                       args.inpTokenBuf + i * config.hiddenDim, config.hiddenDim);
+    if constexpr (UseP2PRead) {
+      if (args.config.useExternalInpBuffer) {
+        for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) {
+          core::WarpCopy(args.shmemCombineInpTokMemObj->template GetAs<T*>() + i * config.hiddenDim,
+                        args.inpTokenBuf + i * config.hiddenDim, config.hiddenDim);
+        }
+      }
+      if (args.weightsBuf) {
+        for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) {
+          core::WarpCopy(
+              args.shmemInpWeightsMemObj->template GetAs<float*>() + i * config.numExpertPerToken,
+              args.weightsBuf + i * config.numExpertPerToken, config.numExpertPerToken);
+        }
+      }
+    } else {
+      for (int tokenIdx = globalWarpId; tokenIdx < totalRecvTokenNum; tokenIdx += globalWarpNum) {
+        index_t destTokId = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe)[tokenIdx];
+        index_t destPe = destTokId / config.MaxNumTokensToRecvPerRank();
+        index_t destLocalTokId = destTokId - destPe * config.MaxNumTokensToRecvPerRank();
+        uint8_t* destStagingPtr =
+            args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(destPe) +
+            (myPe * config.MaxNumTokensToRecvPerRank() + destLocalTokId) * combXferBytes;
+        core::WarpCopy(reinterpret_cast<T*>(destStagingPtr),
+                      args.inpTokenBuf + tokenIdx * config.hiddenDim, config.hiddenDim);
+        if (args.weightsBuf) {
+          core::WarpCopy(reinterpret_cast<float*>(destStagingPtr + hiddenBytes),
+                        args.weightsBuf + tokenIdx * config.numExpertPerToken,
+                        config.numExpertPerToken);
+        }
       }
     }
 #endif
-    if (args.weightsBuf) {
-      for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) {
-        core::WarpCopy(
-            args.shmemInpWeightsMemObj->template GetAs<float*>() + i * config.numExpertPerToken,
-            args.weightsBuf + i * config.numExpertPerToken, config.numExpertPerToken);
-      }
-    }
-  } else {
-    for (int tokenIdx = globalWarpId; tokenIdx < totalRecvTokenNum; tokenIdx += globalWarpNum) {
-      index_t destTokId = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe)[tokenIdx];
-      index_t destPe = destTokId / config.MaxNumTokensToRecvPerRank();
-      index_t destLocalTokId = destTokId - destPe * config.MaxNumTokensToRecvPerRank();
-      uint8_t* destStagingPtr =
-          args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(destPe) +
-          (myPe * config.MaxNumTokensToRecvPerRank() + destLocalTokId) * combXferBytes;
-      core::WarpCopy(reinterpret_cast<T*>(destStagingPtr),
-                     args.inpTokenBuf + tokenIdx * config.hiddenDim, config.hiddenDim);
-      if (args.weightsBuf) {
-        core::WarpCopy(reinterpret_cast<float*>(destStagingPtr + hiddenBytes),
-                       args.weightsBuf + tokenIdx * config.numExpertPerToken,
-                       config.numExpertPerToken);
-      }
-    }
-  }
 
   // Make sure copy on all GPUs are finished
   CrossDeviceBarrierIntraNodeKernel(args, crossDeviceBarrierFlag);
