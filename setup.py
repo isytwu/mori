@@ -89,7 +89,7 @@ class CMakeBuild(build_ext):
         use_ionic = os.environ.get("USE_IONIC", "OFF")
         enable_profiler = os.environ.get("ENABLE_PROFILER", "OFF")
         enable_debug_printf = os.environ.get("ENABLE_DEBUG_PRINTF", "OFF")
-        enable_standard_moe_adapt = os.environ.get("ENABLE_STANDARD_MOE_ADAPT", "ON")
+        enable_standard_moe_adapt = os.environ.get("ENABLE_STANDARD_MOE_ADAPT", "OFF")
         gpu_archs = _get_gpu_archs()
         subprocess.check_call(
             [

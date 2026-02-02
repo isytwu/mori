@@ -111,7 +111,7 @@ LaunchDispatch(mori::moe::EpDispatchCombineHandle& handle, int kernelType,
 std::tuple<torch::Tensor, std::optional<torch::Tensor>> LaunchCombine(
     mori::moe::EpDispatchCombineHandle& handle, int kernelType, const torch::Tensor& input,
     const std::optional<torch::Tensor>& weights, const torch::Tensor& topkIds, int blockNum,
-    int warpPerBlock) {
+    int warpPerBlock, int useExternalInpBuf = -1) {
   assert(input.is_contiguous() && topkIds.is_contiguous());
 
   float* weightsPtr = nullptr;
@@ -124,7 +124,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> LaunchCombine(
                           nullptr, weightsPtr, topkIds.data_ptr<mori::moe::index_t>(),
                           handle.curRankNumToken);
   handle.LaunchCombine((mori::moe::KernelType)kernelType, blockNum, warpPerBlock,
-                       at::cuda::getCurrentHIPStream());
+                       at::cuda::getCurrentHIPStream(), /*enableStandardMoeInput=*/false,
+                       useExternalInpBuf);
 
   auto options = torch::TensorOptions().dtype(input.scalar_type()).device(torch::kCUDA);
   torch::Tensor out =

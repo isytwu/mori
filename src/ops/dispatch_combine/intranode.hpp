@@ -228,41 +228,42 @@ __global__ void EpCombineIntraNodeKernel(EpDispatchCombineArgs<T> args) {
   const size_t combXferBytes = hiddenBytes + weightBytes;
 
   // If EnableStdMoE, call ConvertCombineInputDevice first to convert standard MoE format
+#ifdef ENABLE_STANDARD_MOE_ADAPT
   if constexpr (EnableStdMoE) {
     InvokeConvertCombineInput<T, UseP2PRead>(args, myPe);
   }
-#ifndef ENABLE_STANDARD_MOE_ADAPT
-    if constexpr (UseP2PRead) {
-      if (args.config.useExternalInpBuffer) {
-        for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) {
-          core::WarpCopy(args.shmemCombineInpTokMemObj->template GetAs<T*>() + i * config.hiddenDim,
-                        args.inpTokenBuf + i * config.hiddenDim, config.hiddenDim);
-        }
-      }
-      if (args.weightsBuf) {
-        for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) {
-          core::WarpCopy(
-              args.shmemInpWeightsMemObj->template GetAs<float*>() + i * config.numExpertPerToken,
-              args.weightsBuf + i * config.numExpertPerToken, config.numExpertPerToken);
-        }
-      }
-    } else {
-      for (int tokenIdx = globalWarpId; tokenIdx < totalRecvTokenNum; tokenIdx += globalWarpNum) {
-        index_t destTokId = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe)[tokenIdx];
-        index_t destPe = destTokId / config.MaxNumTokensToRecvPerRank();
-        index_t destLocalTokId = destTokId - destPe * config.MaxNumTokensToRecvPerRank();
-        uint8_t* destStagingPtr =
-            args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(destPe) +
-            (myPe * config.MaxNumTokensToRecvPerRank() + destLocalTokId) * combXferBytes;
-        core::WarpCopy(reinterpret_cast<T*>(destStagingPtr),
-                      args.inpTokenBuf + tokenIdx * config.hiddenDim, config.hiddenDim);
-        if (args.weightsBuf) {
-          core::WarpCopy(reinterpret_cast<float*>(destStagingPtr + hiddenBytes),
-                        args.weightsBuf + tokenIdx * config.numExpertPerToken,
-                        config.numExpertPerToken);
-        }
+#else
+  if constexpr (UseP2PRead) {
+    if (args.config.useExternalInpBuffer) {
+      for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) {
+        core::WarpCopy(args.shmemCombineInpTokMemObj->template GetAs<T*>() + i * config.hiddenDim,
+                      args.inpTokenBuf + i * config.hiddenDim, config.hiddenDim);
       }
     }
+    if (args.weightsBuf) {
+      for (int i = globalWarpId; i < totalRecvTokenNum; i += globalWarpNum) {
+        core::WarpCopy(
+            args.shmemInpWeightsMemObj->template GetAs<float*>() + i * config.numExpertPerToken,
+            args.weightsBuf + i * config.numExpertPerToken, config.numExpertPerToken);
+      }
+    }
+  } else {
+    for (int tokenIdx = globalWarpId; tokenIdx < totalRecvTokenNum; tokenIdx += globalWarpNum) {
+      index_t destTokId = args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(myPe)[tokenIdx];
+      index_t destPe = destTokId / config.MaxNumTokensToRecvPerRank();
+      index_t destLocalTokId = destTokId - destPe * config.MaxNumTokensToRecvPerRank();
+      uint8_t* destStagingPtr =
+          args.shmemCombineInpTokMemObj->template GetAs<uint8_t*>(destPe) +
+          (myPe * config.MaxNumTokensToRecvPerRank() + destLocalTokId) * combXferBytes;
+      core::WarpCopy(reinterpret_cast<T*>(destStagingPtr),
+                    args.inpTokenBuf + tokenIdx * config.hiddenDim, config.hiddenDim);
+      if (args.weightsBuf) {
+        core::WarpCopy(reinterpret_cast<float*>(destStagingPtr + hiddenBytes),
+                      args.weightsBuf + tokenIdx * config.numExpertPerToken,
+                      config.numExpertPerToken);
+      }
+    }
+  }
 #endif
 
   // Make sure copy on all GPUs are finished

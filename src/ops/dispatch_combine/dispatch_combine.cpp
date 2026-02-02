@@ -340,10 +340,15 @@ void EpDispatchCombineHandle::LaunchDispatch(KernelType kernelType, int blockNum
 }
 
 void EpDispatchCombineHandle::LaunchCombine(KernelType kernelType, int blockNum, int warpPerBlock,
-                                            hipStream_t stream, bool enableStandardMoeInput) {
+                                            hipStream_t stream, bool enableStandardMoeInput,
+                                            int useExternalInpBuf) {
   size_t actualWarpNumPerBlock = (warpPerBlock <= 0) ? config.warpNumPerBlock : warpPerBlock;
   dim3 grid((blockNum <= 0) ? config.blockNum : blockNum);
   dim3 block(warpSize * actualWarpNumPerBlock);
+
+  // Determine useExternalInpBuffer: use parameter if >= 0, otherwise use config
+  const bool actualUseExternalInpBuffer =
+      (useExternalInpBuf >= 0) ? static_cast<bool>(useExternalInpBuf) : config.useExternalInpBuffer;
 
   auto argsVariant = GetEpDispatchCombineArgsByInputType(*this);
   std::visit(
@@ -351,22 +356,25 @@ void EpDispatchCombineHandle::LaunchCombine(KernelType kernelType, int blockNum,
         using ArgsT = std::decay_t<decltype(args)>;
         using DataT = typename ArgsT::data_type;
 
+        // Override args.config.useExternalInpBuffer with the actual value
+        args.config.useExternalInpBuffer = actualUseExternalInpBuffer;
+
         size_t sharedMemSize =
             actualWarpNumPerBlock * config.numExpertPerToken * (sizeof(DataT**) + sizeof(float**));
         if (kernelType == KernelType::InterNode) {
-          assert(config.useExternalInpBuffer);
+          assert(actualUseExternalInpBuffer);
           EpCombineInterNodeKernel<<<grid, block, sharedMemSize, stream>>>(args);
         } else if (kernelType == KernelType::InterNodeV1) {
-          assert(config.useExternalInpBuffer);
+          assert(actualUseExternalInpBuffer);
           EpCombineInterNodeV1Kernel<<<grid, block, sharedMemSize, stream>>>(args);
           EpCombineAll<<<this->multiProcessorCount, block, sharedMemSize, stream>>>(args);
         } else if (kernelType == KernelType::InterNodeV1LL) {
-          assert(config.useExternalInpBuffer);
+          assert(actualUseExternalInpBuffer);
           EpCombineInterNodeV1KernelLowLatency<<<grid, block, sharedMemSize, stream>>>(args);
           EpCombineAll<<<this->multiProcessorCount, block, sharedMemSize, stream>>>(args);
         } else if (kernelType == KernelType::IntraNode) {
 #ifndef ENABLE_STANDARD_MOE_ADAPT
-          if (config.useExternalInpBuffer) {
+          if (actualUseExternalInpBuffer) {
             // UseP2PRead=false: does not support zero-copy and provides better bandwidth and lower
             // latency
             EpCombineIntraNodeKernel<DataT, /*UseP2PRead=*/false>
