@@ -190,6 +190,8 @@ class RdmaDevice;
 
 std::optional<uint8_t> ReadRdmaServiceLevelEnv();
 std::optional<uint8_t> ReadRdmaTrafficClassEnv();
+bool ReadIbEnableRelaxedOrderingEnv();
+int MaybeAddRelaxedOrderingFlag(int accessFlag);
 
 /* -------------------------------------------------------------------------- */
 /*                              RdmaDeviceContext                             */
