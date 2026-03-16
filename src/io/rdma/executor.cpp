@@ -67,7 +67,7 @@ void MultithreadExecutor::Worker::MainLoop() {
   int targetCore = workerId + coreOffset;
   CPU_SET(targetCore, &cpuset);
 
-  int rc = pthread_setaffinity_np(thd.native_handle(), sizeof(cpu_set_t), &cpuset);
+  int rc = pthread_setaffinity_np(thd.native_handle(), sizeof(cpu_set_t), &cpuset);//绑核
   if (rc != 0) {
     MORI_IO_WARN(
         "worker {} failed to set affinity to core {}: errno={} ({}). "
@@ -135,7 +135,7 @@ MultithreadExecutor::MultithreadExecutor(int n) : numWorker(n) {
 
 MultithreadExecutor::~MultithreadExecutor() { Shutdown(); }
 
-std::vector<std::pair<int, int>> MultithreadExecutor::SplitWork(const ExecutorReq& req) {
+std::vector<std::pair<int, int>> MultithreadExecutor::SplitWork(const ExecutorReq& req) {//把一个 batch 按区间切给多个 worker
   int numEps = req.eps.size();
   int totalBatchSize = req.sizes.size();
 

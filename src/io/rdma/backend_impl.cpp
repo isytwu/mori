@@ -658,7 +658,7 @@ void RdmaBackendSession::BatchReadWrite(const SizeVec& localOffsets, const SizeV
   if (executor) {
     ExecutorReq req{eps,          local, localOffsets,         remote, remoteOffsets, sizes,
                     callbackMeta, id,    config.postBatchSize, isRead};
-    ret = executor->RdmaBatchReadWrite(req);
+    ret = executor->RdmaBatchReadWrite(req);//
   } else {
     ret = RdmaBatchReadWrite(eps, local, localOffsets, remote, remoteOffsets, sizes, callbackMeta,
                              id, isRead, config.postBatchSize);
@@ -697,7 +697,7 @@ RdmaBackend::RdmaBackend(EngineKey k, const IOEngineConfig& engConfig,
       new ControlPlaneServer(myEngKey, engConfig.host, engConfig.port, rdma.get(), notif.get()));
   server->Start();
 
-  if (config.numWorkerThreads > 1) {
+  if (config.numWorkerThreads > 1) {//多线程
     executor.reset(
         new MultithreadExecutor(std::min(config.qpPerTransfer, config.numWorkerThreads)));
     executor->Start();

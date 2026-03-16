@@ -262,10 +262,10 @@ class MoriIoBenchmark:
 
     def _setup_rdma(self):
         assert self.num_initiator_dev == self.num_target_dev
-        self.world_size = self.num_initiator_dev + self.num_target_dev
+        self.world_size = self.num_initiator_dev + self.num_target_dev#node0都是ini，其他target
         if self.node_rank == 0:
             self.global_rank = self.role_rank
-            self.role = EngineRole.INITIATOR
+            self.role = EngineRole.INITIATOR#设置role
         else:
             self.global_rank = self.role_rank + self.num_initiator_dev
             self.role = EngineRole.TARGET
@@ -402,25 +402,25 @@ class MoriIoBenchmark:
             host=self.host,
             port=self.port,
         )
-        self.engine = IOEngine(key=f"{self.role.name}-{self.role_rank}", config=config)
+        self.engine = IOEngine(key=f"{self.role.name}-{self.role_rank}", config=config)#role name为INITIATOR或TARGET
         config = RdmaBackendConfig(
             qp_per_transfer=self.num_qp_per_transfer,
             post_batch_size=-1,
-            num_worker_threads=self.num_worker_threads,
+            num_worker_threads=self.num_worker_threads,#这里有线程数，线程大于1时用于创建 MultithreadExecutor 的 worker 线程池，worker 线程还会调用 pthread_setaffinity_np 绑 CPU core
             poll_cq_mode=self.poll_cq_mode,
         )
         self.engine.create_backend(BackendType.RDMA, config)
 
         self.engine_desc = self.engine.get_engine_desc()
-        engine_desc_bytes = self.engine_desc.pack()
+        engine_desc_bytes = self.engine_desc.pack()#获取描述符，包括key，node_id，hostname，host，port。后续 register_remote_engine 时用这些信息建立控制面连接（OOB），再通过控制面协商建 QP。
 
-        if self.role is EngineRole.INITIATOR:
-            for i in range(self.num_target_dev):
+        if self.role is EngineRole.INITIATOR:#交换engine描述符（包括hostname，port等）
+            for i in range(self.num_target_dev):#num_target_dev和num_initiator_dev默认都是1
                 self.send_bytes(engine_desc_bytes, self.num_initiator_dev + i)
             for i in range(self.num_target_dev):
                 peer_engine_desc_bytes = self.recv_bytes(self.num_initiator_dev + i)
                 peer_engine_desc = EngineDesc.unpack(peer_engine_desc_bytes)
-                self.engine.register_remote_engine(peer_engine_desc)
+                self.engine.register_remote_engine(peer_engine_desc)#注册描述符
         else:
             for i in range(self.num_initiator_dev):
                 peer_engine_desc_bytes = self.recv_bytes(i)
@@ -429,15 +429,15 @@ class MoriIoBenchmark:
             for i in range(self.num_initiator_dev):
                 self.send_bytes(engine_desc_bytes, i)
 
-        self.mem = self.engine.register_torch_tensor(self.tensor)
+        self.mem = self.engine.register_torch_tensor(self.tensor)#注册GPU tensor
 
-        if self.role is EngineRole.TARGET:
-            mem_desc = self.mem.pack()
+        if self.role is EngineRole.TARGET:#target发送mem描述符
+            mem_desc = self.mem.pack()#内存描述符：engine_key，id（内存块id），device_id，data，size，loc。2个描述符都没有暴露rkey；（1）Initiator 拿到 Target 的 MemoryDesc 后，调 create_session 或 read/write；（2）底层 C++ 会通过控制面（OOB TCP）向 Target 的 ControlPlaneServer 请求 这块内存的 RDMA MR 信息（addr、rkey、length）（3）就是说 rkey 是通过后端控制面按需获取的，不是在 Python 层手动传的
             self.send_bytes(mem_desc, self.role_rank)
         else:
             target_mem_desc = self.recv_bytes(self.num_initiator_dev + self.role_rank)
             self.target_mem = MemoryDesc.unpack(target_mem_desc)
-            self.sess = self.engine.create_session(self.mem, self.target_mem)
+            self.sess = self.engine.create_session(self.mem, self.target_mem)#只在initiator创建session，有ini主动发起read write
 
     def _initialize_xgmi(self):
         config = IOEngineConfig(host="", port=0)
@@ -508,7 +508,7 @@ class MoriIoBenchmark:
         func, arg_list = None, []
         for i in range(transfer_batch_size):
             offset = buffer_size * i
-            if self.enable_sess:
+            if self.enable_sess:#和非sess的区别就是read/write不需要每次都传mem描述符，固定了内存
                 func = self.sess.read if self.op_type == "read" else self.sess.write
                 arg_list.append(
                     (
@@ -535,7 +535,7 @@ class MoriIoBenchmark:
         for i in range(transfer_batch_size):
             status = func(*arg_list[i])
             status_list.append(status)
-        for status in status_list:
+        for status in status_list:#收集所有status
             status.Wait()
         duration = time.time() - st
 
@@ -562,7 +562,7 @@ class MoriIoBenchmark:
                 else self.sess.batch_write
             )
             args = (
-                offsets,
+                offsets,#enable_batch_transfer这里传的是数组，减少调用开销；内部实现：多个 WR（每个可带多个 SGE）链接后一次 post，并在可连续时做合并，减少 WR 数和 post 次数。
                 offsets,
                 sizes,
                 transfer_uid,
@@ -766,9 +766,9 @@ class MoriIoBenchmark:
             backend="gloo",
         ):
             self.initialize()
-            self.run_once(self.buffer_size, self.transfer_batch_size)
+            self.run_once(self.buffer_size, self.transfer_batch_size)#warmup
             self.validate()
-            self.run_once(self.buffer_size, self.transfer_batch_size)
+            self.run_once(self.buffer_size, self.transfer_batch_size)#warmup
             dist.barrier()
             self._run_benchmark_loop()
 
@@ -910,7 +910,7 @@ def benchmark_rdma(args):
     assert num_node == 2
 
     node_rank = int(os.environ["RANK"])
-    nprocs = args.num_initiator_dev if node_rank == 0 else args.num_target_dev
+    nprocs = args.num_initiator_dev if node_rank == 0 else args.num_target_dev#node0是initiator
     torch.multiprocessing.spawn(
         benchmark_engine,
         args=(
