@@ -68,7 +68,7 @@ void test_dram_eviction_no_ssd() {
   // Write 512 more — DRAM full, no SSD → last-resort eviction of key1 (LRU)
   std::vector<char> d3(512, 'C');
   assert(mgr.Write("key3", d3.data(), d3.size()));
-  // key1 was LRU, should have been evicted (data lost, no SSD)
+  // key1 was LRU, should have been evicted (data lost, no SSD)无SSD直接丢数据
   assert(!mgr.Exists("key1"));
   assert(mgr.Exists("key3"));
 
@@ -97,7 +97,7 @@ void test_dram_full_auto_demote_to_ssd() {
   assert(mgr.Write("key2", d2.data(), d2.size()));
   index.Insert("key2", {StorageTier::CPU_DRAM, 0, 512});
 
-  // Write 512 more — DRAM full, should auto-demote key1 (LRU) to SSD
+  // Write 512 more — DRAM full, should auto-demote key1 (LRU) to SSD自动demote到ssd
   std::vector<char> d3(512, 'C');
   assert(mgr.Write("key3", d3.data(), d3.size()));
   index.Insert("key3", {StorageTier::CPU_DRAM, 0, 512});
@@ -166,7 +166,7 @@ void test_demote_promote_with_index() {
   assert(loc1->tier == StorageTier::CPU_DRAM);
 
   // Demote DRAM → SSD
-  assert(mgr.Demote("dp_key"));
+  assert(mgr.Demote("dp_key"));//显示demote
   assert(mgr.Exists("dp_key"));
 
   // Index should now say SSD
@@ -180,7 +180,7 @@ void test_demote_promote_with_index() {
   assert(buf == data);
 
   // Promote SSD → DRAM
-  assert(mgr.Promote("dp_key"));
+  assert(mgr.Promote("dp_key"));//显示promote
 
   // Index should now say DRAM again
   auto loc3 = index.Lookup("dp_key");

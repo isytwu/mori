@@ -40,7 +40,7 @@ void test_put_get() {
   assert(client.Exists("key1"));
 
   std::vector<char> buf(4096, 0);
-  assert(client.GetIntoPtr("key1", reinterpret_cast<uintptr_t>(buf.data()), buf.size()));
+  assert(client.GetIntoPtr("key1", reinterpret_cast<uintptr_t>(buf.data()), buf.size()));//
   assert(buf == data);
 
   std::cout << "PASSED" << std::endl;
@@ -65,7 +65,7 @@ void test_put_dedup() {
   // Data should still be original (dedup skipped write)
   std::vector<char> buf(4096, 0);
   assert(client.GetIntoPtr("key1", reinterpret_cast<uintptr_t>(buf.data()), buf.size()));
-  assert(buf == data);  // Original data, not data2
+  assert(buf == data);  // Original data, not data2 重复put保留第一次的data
 
   std::cout << "PASSED" << std::endl;
 }
@@ -112,7 +112,7 @@ void test_batch_put_get() {
     sizes.push_back(1024);
   }
 
-  auto put_results = client.BatchPutFromPtr(keys, ptrs, sizes);
+  auto put_results = client.BatchPutFromPtr(keys, ptrs, sizes);//batch put
   for (int i = 0; i < N; ++i) {
     assert(put_results[i]);
   }
@@ -130,7 +130,7 @@ void test_batch_put_get() {
     dst_ptrs.push_back(reinterpret_cast<uintptr_t>(read_bufs[i].data()));
   }
 
-  auto get_results = client.BatchGetIntoPtr(keys, dst_ptrs, sizes);
+  auto get_results = client.BatchGetIntoPtr(keys, dst_ptrs, sizes);//batch get
   for (int i = 0; i < N; ++i) {
     assert(get_results[i]);
     assert(read_bufs[i] == all_data[i]);
@@ -199,7 +199,7 @@ void test_dram_full_demote_with_index() {
   std::vector<char> d2(512, 'B');
   assert(client.Put("k2", d2.data(), d2.size()));
 
-  // This write forces auto-demote of k1 (LRU) to SSD
+  // This write forces auto-demote of k1 (LRU) to SSD自动demote到ssd
   std::vector<char> d3(512, 'C');
   assert(client.Put("k3", d3.data(), d3.size()));
 

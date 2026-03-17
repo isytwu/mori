@@ -53,7 +53,7 @@ static std::vector<char> read_file_bytes(const std::string& path) {
   return buf;
 }
 
-void test_ssd_follower_exists_fallback() {
+void test_ssd_follower_exists_fallback() {//leader/follower共享SSD
   std::cout << "test_ssd_follower_exists_fallback... ";
   cleanup_dir(SHARED_SSD_DIR);
 

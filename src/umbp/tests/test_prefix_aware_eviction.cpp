@@ -89,7 +89,7 @@ void test_depth_biased_eviction() {
   assert(mgr.WriteFromPtrWithDepth(new_hash + "_0_k", reinterpret_cast<uintptr_t>(new_data.data()),
                                    new_data.size(), 3));
 
-  // Suffix (depth 5) must be gone; prefix (depth 0) must still exist.
+  // Suffix (depth 5) must be gone; prefix (depth 0) must still exist. Depth越大越先被驱逐
   assert(!mgr.Exists(suffix_hash + "_0_k"));
   assert(mgr.Exists(prefix_hash + "_0_k"));
 
@@ -123,7 +123,7 @@ void test_group_eviction() {
   // Group eviction: A_k and A_v both removed, freeing 1024 B → C_k fits.
   std::vector<char> new_data(512, 'Y');
   uintptr_t new_src = reinterpret_cast<uintptr_t>(new_data.data());
-  assert(mgr.WriteFromPtrWithDepth(hashC + "_0_k", new_src, 512, 3));
+  assert(mgr.WriteFromPtrWithDepth(hashC + "_0_k", new_src, 512, 3));//第三次写入导致同一个 base hash 的 _k 和 _v 会被一起驱逐
 
   // Both A variants must be gone.
   assert(!mgr.Exists(hashA + "_0_k"));
@@ -350,7 +350,7 @@ void test_umbp_client_batch_put_with_depth() {
   std::vector<size_t> sizes = {512, 512, 512};
   std::vector<int> depths = {0, 3, 7};
 
-  auto results = client.BatchPutFromPtrWithDepth(keys, ptrs, sizes, depths);
+  auto results = client.BatchPutFromPtrWithDepth(keys, ptrs, sizes, depths);//UMBPClient 级别的带 depth 批量写入
   assert(results.size() == 3);
   assert(results[0] && results[1] && results[2]);
 
