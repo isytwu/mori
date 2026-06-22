@@ -20,6 +20,9 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 #include <gtest/gtest.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
@@ -43,9 +46,32 @@ constexpr size_t kBlockSize = 4096;
 // required for the node to register a peer_address and accept remote
 // AllocateSlot/CommitSlot RPCs; without it remote BatchPut fails with
 // "peer service connection unavailable".
+//
+// Ask the OS for an ephemeral port (bind to port 0, read it back via
+// getsockname, then release it) instead of handing out a fixed,
+// monotonically-increasing port number. A hardcoded base collides with
+// whatever unrelated process on the host happens to be sitting on that exact
+// port (observed in practice: a long-lived ssh/IDE remote-server process
+// parked on the Nth port in the sequence) -- see test_engine.cpp's
+// GetFreePort() for the same pattern.
 inline uint16_t NextPeerServicePort() {
-  static std::atomic<uint16_t> next{52000};
-  return next.fetch_add(1);
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return 0;
+
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = 0;
+  addr.sin_addr.s_addr = INADDR_ANY;
+
+  uint16_t port = 0;
+  if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+    socklen_t len = sizeof(addr);
+    if (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0) {
+      port = ntohs(addr.sin_port);
+    }
+  }
+  close(fd);
+  return port;
 }
 
 // The master index is eventually consistent: a committed key becomes visible
