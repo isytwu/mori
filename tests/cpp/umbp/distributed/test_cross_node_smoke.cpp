@@ -28,6 +28,7 @@
 #include <chrono>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -56,7 +57,7 @@ constexpr size_t kBlockSize = 4096;
 // GetFreePort() for the same pattern.
 inline uint16_t NextPeerServicePort() {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return 0;
+  if (fd < 0) throw std::runtime_error("NextPeerServicePort: socket() failed");
 
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
@@ -71,6 +72,8 @@ inline uint16_t NextPeerServicePort() {
     }
   }
   close(fd);
+  if (port == 0)
+    throw std::runtime_error("NextPeerServicePort: failed to obtain an ephemeral port");
   return port;
 }
 
