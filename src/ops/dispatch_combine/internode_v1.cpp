@@ -597,10 +597,31 @@ inline __device__ void DispatchSync(EpDispatchCombineArgs<T>& args) {
   MORI_TRACE_SPAN(profiler, Slot::DispatchSync);
 
   int nodePeOffset = myNode * config.gpuPerNode;
-  int finishedWarp = 0;
-  if (laneId == 0) finishedWarp = atomicAdd(args.dispatchGridBarrier, 1);
-  finishedWarp = __shfl(finishedWarp, 0);
-  if ((finishedWarp + 1) == globalWarpNum) {
+
+  // Converge the grid one ticket per *block*, not one per warp.
+  //
+  // Every warp used to atomicAdd the same address, so the arrivals serialized:
+  // gridDim*warpNum read-modify-writes on a single cache line. At 4 tokens that
+  // is the dominant cost of this kernel -- a full tuning sweep shows dispatch
+  // latency rising monotonically with both dimensions (block 16 -> 304: 40.9 ->
+  // 49.4us; warp 4 -> 16: 40.9 -> 45.5us) even though the extra warps have no
+  // tokens to move, which is the signature of a contended barrier rather than
+  // of useful work.
+  //
+  // Reducing inside the block first cuts the traffic by warpNum (4-16x here).
+  // __syncthreads() is safe: every thread of a block runs this, the branch above
+  // it is taken per block (blockId < rdmaBlockNum), and none of the branches
+  // return early.
+  __shared__ uint32_t blockArrived;
+  __syncthreads();
+  if (thdId == 0) blockArrived = atomicAdd(args.dispatchGridBarrier, warpNum);
+  __syncthreads();
+
+  // Exactly one block observes the count completing, and its warp 0 runs the
+  // tail the last warp used to run.
+  bool lastBlock = (blockArrived + static_cast<uint32_t>(warpNum)) ==
+                   static_cast<uint32_t>(globalWarpNum);
+  if (lastBlock && (warpId == 0)) {
     if (laneId < config.gpuPerNode) {
       int destPe = myNode * config.gpuPerNode + laneId;
       index_t numTokenSignal = core::AtomicLoadSeqCstSystem(args.destPeTokenCounter + destPe) + 1;
