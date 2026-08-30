@@ -99,6 +99,20 @@
     },
     {
       "dtype": "fp8_e4m3_fnuz",
+      "num_tokens": 4,
+      "hidden_dim": 6144,
+      "block_num": 32,
+      "rdma_block_num": 16,
+      "warp_per_block": 6,
+      "bandwidth_gbps": 3.5,
+      "avg_rdma_bandwidth_gbps": 0.92,
+      "avg_xgmi_bandwidth_gbps": 3.06,
+      "avg_ll_bandwidth_gbps": 3.5,
+      "avg_latency_us": 53.52,
+      "bandwidth_metric": "grand_mean"
+    },
+    {
+      "dtype": "fp8_e4m3_fnuz",
       "num_tokens": 64,
       "hidden_dim": 7168,
       "block_num": 80,
