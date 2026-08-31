@@ -169,6 +169,22 @@ struct EpDispatchCombineConfig {
     return worldSize * MaxNumTokensToRecvPerRank();
   }
 
+  // Number of token slots in the P2P-write ("push") region of combineInp. The slot
+  // key is (writerPe, ownerNode, ownerLocalTokId); see CombinePushSlot() in
+  // src/ops/dispatch_combine/common.hpp for why that key is collision-free.
+  inline __host__ __device__ int CombinePushSlotNum() const {
+    return worldSize * (worldSize / gpuPerNode) * MaxNumTokensToSendPerRank();
+  }
+  // The push region sits *above* the pull region rather than aliasing it. In mode 1
+  // both layouts are live in the same buffer at the same time -- an inter-node origin
+  // token is still deposited at its local recv slot while an intra-node origin token
+  // is pushed -- and both index spaces start at 0, so overlaying them silently
+  // overwrites one contribution per collision.
+  inline __host__ __device__ int CombinePushSlotBase() const { return MaxNumTokensToRecv(); }
+  inline __host__ __device__ int CombineStagingSlotNum() const {
+    return CombinePushSlotBase() + CombinePushSlotNum();
+  }
+
   std::vector<int32_t> ToPackedI32Array() const;
   static EpDispatchCombineConfig FromPackedI32Array(const int32_t* packed, size_t size);
   inline __host__ __device__ size_t HiddenBytes(size_t tokenTypeSize) const {
@@ -375,6 +391,10 @@ class EpDispatchCombineHandle {
 
   int fp8BlockwiseCombineScaleDim{0};
   int fp8BlockwiseCombineScaleTypeSize{0};
+  // Combine P2P-write ("push") mode, latched from MORI_EP_COMBINE_P2P_WRITE at
+  // handle construction so the staging buffers can be sized for it.
+  // 0 = off (pull, default), 1 = intra-node gather pushed, 2 = intra + inter.
+  int combineP2PWriteMode{0};
   // Routed expert indices for tokens
   index_t* tokenIndices{nullptr};
 
@@ -477,6 +497,9 @@ struct EpDispatchCombineArgs {
   using data_type = T;
   EpDispatchCombineConfig config;
   int fp8BlockwiseCombineScaleDim{0};
+  // Combine P2P-write ("push") mode, from MORI_EP_COMBINE_P2P_WRITE.
+  // 0 = off (pull, default), 1 = intra-node gather pushed, 2 = intra + inter.
+  int combineP2PWriteMode{0};
   int rdmaBlockNum{-1};
   bool replayMode{false};
   index_t curRankNumToken{0};
@@ -542,6 +565,9 @@ struct EpDispatchCombineArgs {
 struct EpDispatchCombineArgsRaw {
   EpDispatchCombineConfig config;
   int fp8BlockwiseCombineScaleDim{0};
+  // Combine P2P-write ("push") mode, from MORI_EP_COMBINE_P2P_WRITE.
+  // 0 = off (pull, default), 1 = intra-node gather pushed, 2 = intra + inter.
+  int combineP2PWriteMode{0};
   int rdmaBlockNum{-1};
   bool replayMode{false};
   index_t curRankNumToken{0};

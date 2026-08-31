@@ -47,6 +47,7 @@ static constexpr int32_t EP_CONFIG_I32_VERSION = 1;
 // 56 → block_elems = 7168/56 = 128, matching the AccumNum=8 + VecBytes=8 dequant specialization.
 static constexpr int kDefaultFp8BlockwiseScaleDim = 56;
 static constexpr const char* kFp8BlockwiseScaleDimEnv = "MORI_FP8_COMBINE_SCALE_DIM";
+static constexpr const char* kCombineP2PWriteEnv = "MORI_EP_COMBINE_P2P_WRITE";
 
 std::vector<int32_t> EpDispatchCombineConfig::ToPackedI32Array() const {
   return {
@@ -122,6 +123,31 @@ EpDispatchCombineHandle::EpDispatchCombineHandle(EpDispatchCombineConfig config_
       MORI_OPS_INFO("numQpPerPe {} larger than shmem numQpPerPe {}, set to {}", config.numQpPerPe,
                     shmemNumQpPerPe, shmemNumQpPerPe);
     }
+  }
+
+  // Combine P2P-write ("push") mode. Only the InterNodeV1/V1LL combine implements
+  // it; everything else keeps the pull gather. Latched here (not read per launch)
+  // because it changes how combineInp / shmemInpWeights are sized.
+  combineP2PWriteMode = env::GetInt(kCombineP2PWriteEnv).value_or(0);
+  if (combineP2PWriteMode < 0 || combineP2PWriteMode > 2) {
+    MORI_OPS_WARN("{}={} out of range [0,2], falling back to 0 (pull)", kCombineP2PWriteEnv,
+                  combineP2PWriteMode);
+    combineP2PWriteMode = 0;
+  }
+  if (combineP2PWriteMode != 0 && config.kernelType != KernelType::InterNodeV1 &&
+      config.kernelType != KernelType::InterNodeV1LL) {
+    MORI_OPS_WARN("{} is only implemented for InterNodeV1/V1LL, ignoring", kCombineP2PWriteEnv);
+    combineP2PWriteMode = 0;
+  }
+  if (combineP2PWriteMode == 2) {
+    // TODO(next commit): the inter-node gather still pulls.
+    MORI_OPS_WARN("{}=2 (inter-node push) is not implemented yet, falling back to 1",
+                  kCombineP2PWriteEnv);
+    combineP2PWriteMode = 1;
+  }
+  if (combineP2PWriteMode != 0 && config.rank == 0) {
+    MORI_OPS_INFO("EpDispatchCombine combine P2P-write mode {} ({})", combineP2PWriteMode,
+                  combineP2PWriteMode == 1 ? "intra-node push" : "intra + inter-node push");
   }
 
   if (IsBlockwiseCombineQuant(config.quantType)) {
@@ -340,6 +366,17 @@ void EpDispatchCombineHandle::InitializeShmemBuf() {
              config.kernelType == KernelType::InterNodeV1LL) {
     auto& bufs = shmemTokBufs.emplace<ShmemBufsInterNodeV1>();
     const int nNodes = config.worldSize / config.gpuPerNode;
+    // In P2P-write combine, combineInp is addressed by CombinePushSlot() --
+    // (writerPe, ownerNode, ownerLocalTokId) -- rather than by the local recv
+    // slot id, so it needs nNodes * MaxNumTokensToSend() slots instead of
+    // MaxNumTokensToRecv(). Keep the max of the two: the pull path still
+    // indexes by recv slot, and MaxNumTokensToRecvPerRank can be capped below
+    // MaxNumTokensToSendPerRank by maxTotalRecvTokens.
+    if (combineP2PWriteMode != 0) {
+      size_t pushStagingSize =
+          static_cast<size_t>(config.CombineStagingSlotNum()) * config.MaxXferBytesPerToken();
+      maxStagingSize = std::max(maxStagingSize, pushStagingSize);
+    }
     size_t dispatchInpSize = static_cast<ssize_t>(nNodes) * config.MaxNumTokensToSendPerRank() *
                              config.MaxXferBytesPerToken();
     size_t stagingSize = static_cast<ssize_t>(2 * nNodes) * config.MaxNumTokensToSendPerRank() *
@@ -368,7 +405,17 @@ void EpDispatchCombineHandle::InitializeShmemBuf() {
 
   size_t maxWeightSize =
       static_cast<size_t>(config.MaxNumTokensToRecv()) * config.numExpertPerToken * sizeof(float);
-  shmemInpWeightsMemObj = MallocSymm(maxWeightSize, hipDeviceMallocUncached);
+  // shmemInpWeights is pushed alongside combineInp and shares its slot index, so
+  // it has to cover the same slot space. Kept as its own buffer rather than
+  // interleaved into the token slot: interleaving would break the 16B alignment
+  // CombineVecAligned() requires and silently drop the gather to the 4B path.
+  size_t maxInpWeightSize = maxWeightSize;
+  if (combineP2PWriteMode != 0) {
+    maxInpWeightSize =
+        std::max(maxInpWeightSize, static_cast<size_t>(config.CombineStagingSlotNum()) *
+                                       config.numExpertPerToken * sizeof(float));
+  }
+  shmemInpWeightsMemObj = MallocSymm(maxInpWeightSize, hipDeviceMallocUncached);
   shmemDispatchOutWeightsMemObj = MallocSymm(maxWeightSize, hipDeviceMallocUncached);
   shmemCombineOutWeightsMemObj = MallocSymm(maxWeightSize, hipDeviceMallocUncached);
 
@@ -589,6 +636,7 @@ EpDispatchCombineArgsRaw GetEpDispatchCombineArgsRaw(const EpDispatchCombineHand
   EpDispatchCombineArgsRaw args;
   args.config = handle.config;
   args.fp8BlockwiseCombineScaleDim = handle.fp8BlockwiseCombineScaleDim;
+  args.combineP2PWriteMode = handle.combineP2PWriteMode;
   args.rdmaBlockNum = rdmaBlockNum;
   args.curRankNumToken = handle.curRankNumToken;
   args.tokenIndices = handle.tokenIndices;

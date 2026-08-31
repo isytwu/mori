@@ -60,6 +60,54 @@ inline __device__ int NullSendBufSlotOffset(const EpDispatchCombineConfig& confi
   return config.worldSize * config.MaxNumTokensToSendPerRank();
 }
 
+// ---------------------------------------------------------------------------
+// P2P-write ("push") combine staging.
+//
+// In the default pull combine, a PE gathering one of its tokens reads each
+// expert's partial straight out of that expert PE's combineInp. The read is an
+// xGMI round trip per (token, expert) and its *latency* is what caps the small-
+// token combine. The push variant flips it: in CombineSync each expert PE
+// writes its partial into the *reader's* combineInp, so the gather is all local
+// loads.
+//
+// A pushed slot has to be addressable by both sides without any extra
+// bookkeeping (dispatch is untouched, so the only thing the writer has is
+// dispTokIdToSrcTokId -> the token's original owner). The key is:
+//
+//   (writerPe, ownerNode, ownerLocalTokId)
+//
+// which is unique on any given reader PE R:
+//   - intra-node origin: R *is* the owner, ownerNode == R's node, and
+//     ownerLocalTokId is R's own token id. Dispatch dedups per destination PE,
+//     so at most one push lands per (writerPe, tokenId).
+//   - inter-node origin: R is the node aggregator, i.e. the PE that received
+//     the token over RDMA. Dispatch always sends to
+//     `destNode * gpuPerNode + (ownerPe % gpuPerNode)` (see the proxyPe in
+//     internode_v1.cpp), so for a fixed R and a fixed ownerNode the owner PE is
+//     uniquely determined, and (ownerNode, ownerLocalTokId) names the token.
+//   - the two never alias: intra origin has ownerNode == myNode, inter origin
+//     has ownerNode != myNode.
+//
+// Stride is MaxNumTokensToSendPerRank (the owner's token space), NOT
+// MaxNumTokensToRecvPerRank -- the latter can be smaller when maxTotalRecvTokens
+// is set, which would make distinct owner tokens alias.
+// Slot count lives on the config (EpDispatchCombineConfig::CombinePushSlotNum) so the
+// host-only allocator in dispatch_combine.cpp can size the buffers with it.
+inline __device__ int CombinePushSlot(const EpDispatchCombineConfig& config, int writerPe,
+                                      int ownerNode, int ownerLocalTokId) {
+  const int nNodes = config.worldSize / config.gpuPerNode;
+  // The JIT build does not pass -DNDEBUG, so these stay live and catch a
+  // mis-sized combineInp (the failure mode is a silent OOB write into a peer's
+  // heap, which shows up much later as unrelated corruption).
+  assert((writerPe >= 0) && (writerPe < config.worldSize));
+  assert((ownerNode >= 0) && (ownerNode < nNodes));
+  assert((ownerLocalTokId >= 0) && (ownerLocalTokId < config.MaxNumTokensToSendPerRank()));
+  int slot = config.CombinePushSlotBase() +
+             (writerPe * nNodes + ownerNode) * config.MaxNumTokensToSendPerRank() + ownerLocalTokId;
+  assert(slot < config.CombineStagingSlotNum());
+  return slot;
+}
+
 // Partitions a loop over (numItems x dimSize) work across globalWarpNum warps.
 // When there are more warps than items, multiple warps collaborate on a single item
 // by splitting dimSize; when there are fewer warps, each warp handles multiple items.
