@@ -803,20 +803,42 @@ namespace combine_impl {
 //     of it.
 constexpr size_t kCombineVecBytes = 16;
 
+// How many vector steps this gather issues before it accumulates any of them.
+//
+// WARP_ACCUM_UNROLL defaults to 2, which is the better choice where the reads
+// are cheap enough that instruction-level overlap pays for the registers it
+// costs. Here it does not: measured on MI300X EP16 (hidden 6144, fp8->bf16,
+// full 105-config sweep, alternating A/B) the combine phase is faster at 1 for
+// every token count tried -- 4: 64.5 -> 55.1us, 8: 57.9 -> 54.3us,
+// 16: 59.6 -> 53.6us, 32: 68.3 -> 63.4us. Going the other way is worse still
+// (32 tokens at Unroll=4: 74.7us), so 1 is not a local artefact of one shape.
+//
+// Two things move together with this number and both point the same way. The
+// unrolled loads live in registers -- Unroll*AccumNum vectors per lane, so 16
+// of them at Unroll=2 with top-8 -- and dropping to 1 halves that pressure.
+// CombineVecStep() also halves, which doubles warpsPerToken and spreads a
+// token's hidden dimension over twice as many warps; at these token counts the
+// grid has warps to spare, so the wider split is free parallelism.
+//
+// Scoped to this gather rather than changed globally: WARP_ACCUM_UNROLL is
+// shared with the intra-node combine path, which was not measured here.
+constexpr int kCombineAccumUnroll = 1;
+
 inline __device__ bool CombineVecAligned(size_t tokHiddenBytes, size_t tokCombXferBytes) {
   return ((tokHiddenBytes % kCombineVecBytes) == 0) && ((tokCombXferBytes % kCombineVecBytes) == 0);
 }
 
 template <typename TokT>
 inline __device__ size_t CombineVecStep(int warpSizeRt) {
-  return static_cast<size_t>(WARP_ACCUM_UNROLL) * warpSizeRt * (kCombineVecBytes / sizeof(TokT));
+  return static_cast<size_t>(kCombineAccumUnroll) * warpSizeRt * (kCombineVecBytes / sizeof(TokT));
 }
 
 template <typename TokT>
 inline __device__ void CombineGather(TokT* dest, TokT** srcPtrs, int accumNum, size_t nelems,
                                      bool vecAligned) {
   if (vecAligned) {
-    core::WarpAccumLF<TokT, kCombineVecBytes>(dest, srcPtrs, nullptr, accumNum, nelems);
+    core::WarpAccumLF<TokT, kCombineVecBytes, kCombineAccumUnroll>(dest, srcPtrs, nullptr, accumNum,
+                                                                   nelems);
   } else {
     core::WarpAccum<TokT, 4>(dest, srcPtrs, nullptr, accumNum, nelems);
   }
