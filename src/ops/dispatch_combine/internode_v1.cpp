@@ -997,7 +997,34 @@ __forceinline__ __device__ void CombineIntraNodeLLTyped(EpDispatchCombineArgs<T>
   }
 }
 
-template <typename TokT, typename T>
+// Resolve the (pe, slot) a lane must read its expert partial from, for the
+// inter-node gather -- the node aggregator reducing a token owned by `ownerNode`.
+//
+// Unlike the intra-node case the reader cannot name the slot from what it already
+// has: it addresses remote tokens by its own RDMA staging slot, while the pushing
+// expert PE only knows the token's original owner. Recovering the shared key costs
+// one 4B read of dispTokIdToSrcTokId on the expert PE -- an xGMI read, but 4 bytes
+// issued once per (token, expert) ahead of the gather, against the 12KB payload
+// read it replaces.
+template <bool UseP2PWrite, typename T>
+__forceinline__ __device__ void CombineInterSrc(const EpDispatchCombineArgs<T>& args, int myPe,
+                                                int destPe, index_t destTokId, int ownerNode,
+                                                int& srcPe, size_t& srcSlot) {
+  const EpDispatchCombineConfig& config = args.config;
+  index_t destLocalTokId = LocalTokIdFromFlatTokenIndex(config, destTokId);
+  if constexpr (UseP2PWrite) {
+    index_t srcFlat =
+        args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(destPe)[destLocalTokId];
+    srcPe = myPe;
+    srcSlot = static_cast<size_t>(
+        CombinePushSlot(config, destPe, ownerNode, LocalTokIdFromFlatTokenIndex(config, srcFlat)));
+  } else {
+    srcPe = destPe;
+    srcSlot = static_cast<size_t>(destLocalTokId);
+  }
+}
+
+template <typename TokT, bool UseP2PWrite, typename T>
 __forceinline__ __device__ void CombineInterNodeTyped(EpDispatchCombineArgs<T>& args,
                                                       size_t tokHiddenBytes,
                                                       size_t tokCombXferBytes) {
@@ -1074,13 +1101,15 @@ __forceinline__ __device__ void CombineInterNodeTyped(EpDispatchCombineArgs<T>& 
                 index_t destPe = PeFromFlatTokenIndex(config, destTokId);
                 index_t destNode = destPe / config.gpuPerNode;
                 if (destNode == myNode) {
-                  index_t destLocalTokId = LocalTokIdFromFlatTokenIndex(config, destTokId);
+                  int srcPe;
+                  size_t srcSlot;
+                  CombineInterSrc<UseP2PWrite>(args, myPe, destPe, destTokId, node, srcPe, srcSlot);
                   srcPtrs[laneId] =
-                      args.interNodeV1TokBufs.combineInp->template GetAs<TokT*>(destPe) +
-                      destLocalTokId * hiddenDim;
+                      args.interNodeV1TokBufs.combineInp->template GetAs<TokT*>(srcPe) +
+                      srcSlot * hiddenDim;
                   srcWeightsPtr[laneId] =
-                      args.shmemInpWeightsMemObj->template GetAs<float*>(destPe) +
-                      destLocalTokId * config.numExpertPerToken;
+                      args.shmemInpWeightsMemObj->template GetAs<float*>(srcPe) +
+                      srcSlot * config.numExpertPerToken;
                 }
                 // routing-handle callers own this tensor, hence no need to reset.
                 if (args.dispTokIdToSrcTokIdLocal == nullptr) {
@@ -1172,7 +1201,7 @@ __forceinline__ __device__ void CombineInterNodeTyped(EpDispatchCombineArgs<T>& 
   }
 }
 
-template <typename TokT, typename T>
+template <typename TokT, bool UseP2PWrite, typename T>
 __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>& args,
                                                         size_t tokHiddenBytes,
                                                         size_t tokCombXferBytes) {
@@ -1235,11 +1264,13 @@ __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>
           index_t destPe = PeFromFlatTokenIndex(config, destTokId);
           index_t destNode = destPe / config.gpuPerNode;
           if (destNode == myNode) {
-            index_t destLocalTokId = LocalTokIdFromFlatTokenIndex(config, destTokId);
-            srcPtrs[laneId] = args.interNodeV1TokBufs.combineInp->template GetAs<TokT*>(destPe) +
-                              destLocalTokId * hiddenDim + hiddenDimOffset;
-            srcWeightsPtr[laneId] = args.shmemInpWeightsMemObj->template GetAs<float*>(destPe) +
-                                    destLocalTokId * config.numExpertPerToken;
+            int srcPe;
+            size_t srcSlot;
+            CombineInterSrc<UseP2PWrite>(args, myPe, destPe, destTokId, node, srcPe, srcSlot);
+            srcPtrs[laneId] = args.interNodeV1TokBufs.combineInp->template GetAs<TokT*>(srcPe) +
+                              srcSlot * hiddenDim + hiddenDimOffset;
+            srcWeightsPtr[laneId] = args.shmemInpWeightsMemObj->template GetAs<float*>(srcPe) +
+                                    srcSlot * config.numExpertPerToken;
           }
         }
         CombineGather<TokT>(reinterpret_cast<TokT*>(stagingPtr + globalTokenId * tokCombXferBytes) +
@@ -1380,15 +1411,23 @@ inline __device__ void CombineInterNode(EpDispatchCombineArgs<T>& args) {
       INTERNODE_V1_PROFILER_INIT_CONTEXT(profiler, args.profilerConfig, globalWarpId, laneId));
   MORI_TRACE_SPAN(profiler, Slot::CombineInterNode);
 
+  // Only mode 2 pushes inter-node origin tokens; mode 1 leaves them on pull.
+  const bool push = CombinePushMode(args) == 2;
   if (args.config.quantType == QuantType::Fp8DirectCast) {
     using TokT = core::CombineInternalFp8;
     const size_t tokHiddenBytes = hiddenDim * sizeof(TokT);
     const size_t tokCombXferBytes =
         (args.weightsBuf == nullptr) ? tokHiddenBytes : tokHiddenBytes + weightBytes;
-    combine_impl::CombineInterNodeTyped<TokT>(args, tokHiddenBytes, tokCombXferBytes);
+    if (push)
+      combine_impl::CombineInterNodeTyped<TokT, true>(args, tokHiddenBytes, tokCombXferBytes);
+    else
+      combine_impl::CombineInterNodeTyped<TokT, false>(args, tokHiddenBytes, tokCombXferBytes);
     return;
   }
-  combine_impl::CombineInterNodeTyped<T>(args, hiddenBytes, combXferBytes);
+  if (push)
+    combine_impl::CombineInterNodeTyped<T, true>(args, hiddenBytes, combXferBytes);
+  else
+    combine_impl::CombineInterNodeTyped<T, false>(args, hiddenBytes, combXferBytes);
 }
 
 template <typename T>
@@ -1397,15 +1436,22 @@ inline __device__ void CombineInterNodeLL(EpDispatchCombineArgs<T>& args) {
   IF_ENABLE_PROFILER(
       INTERNODE_V1_PROFILER_INIT_CONTEXT(profiler, args.profilerConfig, globalWarpId, laneId));
   MORI_TRACE_SPAN(profiler, Slot::CombineInterNodeLL);
+  const bool push = CombinePushMode(args) == 2;
   if (args.config.quantType == QuantType::Fp8DirectCast) {
     using TokT = core::CombineInternalFp8;
     const size_t tokHiddenBytes = hiddenDim * sizeof(TokT);
     const size_t tokCombXferBytes =
         (args.weightsBuf == nullptr) ? tokHiddenBytes : tokHiddenBytes + weightBytes;
-    combine_impl::CombineInterNodeLLTyped<TokT>(args, tokHiddenBytes, tokCombXferBytes);
+    if (push)
+      combine_impl::CombineInterNodeLLTyped<TokT, true>(args, tokHiddenBytes, tokCombXferBytes);
+    else
+      combine_impl::CombineInterNodeLLTyped<TokT, false>(args, tokHiddenBytes, tokCombXferBytes);
     return;
   }
-  combine_impl::CombineInterNodeLLTyped<T>(args, hiddenBytes, combXferBytes);
+  if (push)
+    combine_impl::CombineInterNodeLLTyped<T, true>(args, hiddenBytes, combXferBytes);
+  else
+    combine_impl::CombineInterNodeLLTyped<T, false>(args, hiddenBytes, combXferBytes);
 }
 }  // namespace v1
 

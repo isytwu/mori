@@ -139,12 +139,6 @@ EpDispatchCombineHandle::EpDispatchCombineHandle(EpDispatchCombineConfig config_
     MORI_OPS_WARN("{} is only implemented for InterNodeV1/V1LL, ignoring", kCombineP2PWriteEnv);
     combineP2PWriteMode = 0;
   }
-  if (combineP2PWriteMode == 2) {
-    // TODO(next commit): the inter-node gather still pulls.
-    MORI_OPS_WARN("{}=2 (inter-node push) is not implemented yet, falling back to 1",
-                  kCombineP2PWriteEnv);
-    combineP2PWriteMode = 1;
-  }
   if (combineP2PWriteMode != 0 && config.rank == 0) {
     MORI_OPS_INFO("EpDispatchCombine combine P2P-write mode {} ({})", combineP2PWriteMode,
                   combineP2PWriteMode == 1 ? "intra-node push" : "intra + inter-node push");
