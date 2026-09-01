@@ -782,12 +782,14 @@ namespace combine_impl {
 //     of it.
 constexpr size_t kCombineVecBytes = 16;
 
-// Vector steps issued before accumulating any of them. The shared
-// WARP_ACCUM_UNROLL default of 2 costs registers (Unroll*AccumNum vectors per
-// lane) and halves warpsPerToken via CombineVecStep(); at these token counts
-// the grid has warps to spare, so 1 measures faster. Scoped here rather than
-// changed globally -- the default also feeds the intra-node combine path.
-constexpr int kCombineAccumUnroll = 1;
+// Vector steps issued per gather iteration. Back at the shared
+// WARP_ACCUM_UNROLL default now that this gather no longer uses the load-first
+// form: without Unroll*AccumNum vectors held live per lane, the register
+// pressure that made 1 the better choice is gone, and 2 measures faster again
+// (32 tokens: 63.7/64.0us at 1 against 60.9/60.9 at 2). Still named here
+// rather than taken from the macro so the pairing with WarpAccum below is
+// explicit.
+constexpr int kCombineAccumUnroll = 2;
 
 inline __device__ bool CombineVecAligned(size_t tokHiddenBytes, size_t tokCombXferBytes) {
   return ((tokHiddenBytes % kCombineVecBytes) == 0) && ((tokCombXferBytes % kCombineVecBytes) == 0);
@@ -802,8 +804,8 @@ template <typename TokT>
 inline __device__ void CombineGather(TokT* dest, TokT** srcPtrs, int accumNum, size_t nelems,
                                      bool vecAligned) {
   if (vecAligned) {
-    core::WarpAccumLF<TokT, kCombineVecBytes, kCombineAccumUnroll>(dest, srcPtrs, nullptr, accumNum,
-                                                                   nelems);
+    core::WarpAccum<TokT, kCombineVecBytes, kCombineAccumUnroll>(dest, srcPtrs, nullptr, accumNum,
+                                                                 nelems);
   } else {
     core::WarpAccum<TokT, 4>(dest, srcPtrs, nullptr, accumNum, nelems);
   }

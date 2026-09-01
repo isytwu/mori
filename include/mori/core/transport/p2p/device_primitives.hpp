@@ -761,13 +761,16 @@ __forceinline__ __device__ void WarpAccum(T* __restrict__ dest, T* const* __rest
 #define WARP_ACCUM_UNROLL 2
 #endif
 
-template <typename T, int VecBytes>
+// Unroll is a template parameter here for the same reason it is on
+// WarpAccumLF: a caller can pick a different value without moving the default
+// for every other user of this primitive.
+template <typename T, int VecBytes, int Unroll = WARP_ACCUM_UNROLL>
 __forceinline__ __device__ void WarpAccum(T* __restrict__ dest, T* const* __restrict__ srcs,
                                           const float* __restrict__ srcScales, size_t accumNum,
                                           size_t nelems) {
-#define WARP_ACCUM_CASE(AccumNum)                                                       \
-  case AccumNum:                                                                        \
-    WarpAccum<T, VecBytes, AccumNum, WARP_ACCUM_UNROLL>(dest, srcs, srcScales, nelems); \
+#define WARP_ACCUM_CASE(AccumNum)                                            \
+  case AccumNum:                                                             \
+    WarpAccum<T, VecBytes, AccumNum, Unroll>(dest, srcs, srcScales, nelems); \
     break;
 
   switch (accumNum) {
