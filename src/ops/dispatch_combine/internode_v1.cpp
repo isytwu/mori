@@ -878,11 +878,11 @@ inline __device__ void CombineGather(TokT* dest, TokT** srcPtrs, int accumNum, s
 // intra-node gather of one of *my own* tokens.
 //   pull: the partial sits in the expert PE's own recv slot -> remote read.
 //   push: CombineSync already deposited it in my buffer -> local read.
-template <bool UseP2PWrite>
 __forceinline__ __device__ void CombineIntraSrc(const EpDispatchCombineConfig& config, int myPe,
                                                 int myNode, int destPe, index_t destTokId,
-                                                int tokenId, int& srcPe, size_t& srcSlot) {
-  if constexpr (UseP2PWrite) {
+                                                int tokenId, bool useP2PWrite, int& srcPe,
+                                                size_t& srcSlot) {
+  if (useP2PWrite) {
     srcPe = myPe;
     srcSlot = static_cast<size_t>(CombinePushSlot(config, destPe, myNode, tokenId));
   } else {
@@ -891,10 +891,10 @@ __forceinline__ __device__ void CombineIntraSrc(const EpDispatchCombineConfig& c
   }
 }
 
-template <typename TokT, bool UseP2PWrite, typename T>
+template <typename TokT, typename T>
 __forceinline__ __device__ void CombineIntraNodeTyped(EpDispatchCombineArgs<T>& args,
                                                       size_t tokHiddenBytes,
-                                                      size_t tokCombXferBytes) {
+                                                      size_t tokCombXferBytes, bool useP2PWrite) {
   DEF_COMMON_VARS;
 
   int blockOffset = args.rdmaBlockNum;
@@ -921,8 +921,8 @@ __forceinline__ __device__ void CombineIntraNodeTyped(EpDispatchCombineArgs<T>& 
       if (destNode == myNode) {
         int srcPe;
         size_t srcSlot;
-        CombineIntraSrc<UseP2PWrite>(config, myPe, myNode, destPe, destTokId, tokenId, srcPe,
-                                     srcSlot);
+        CombineIntraSrc(config, myPe, myNode, destPe, destTokId, tokenId, useP2PWrite,
+                        srcPe, srcSlot);
         srcPtrs[laneId] =
             args.interNodeV1TokBufs.combineInp->template GetAs<TokT*>(srcPe) + srcSlot * hiddenDim;
         srcWeightsPtr[laneId] = args.shmemInpWeightsMemObj->template GetAs<float*>(srcPe) +
@@ -939,10 +939,10 @@ __forceinline__ __device__ void CombineIntraNodeTyped(EpDispatchCombineArgs<T>& 
   }
 }
 
-template <typename TokT, bool UseP2PWrite, typename T>
+template <typename TokT, typename T>
 __forceinline__ __device__ void CombineIntraNodeLLTyped(EpDispatchCombineArgs<T>& args,
                                                         size_t tokHiddenBytes,
-                                                        size_t tokCombXferBytes) {
+                                                        size_t tokCombXferBytes, bool useP2PWrite) {
   DEF_COMMON_VARS;
 
   // Distribute tokens evenly to all blocks
@@ -978,8 +978,8 @@ __forceinline__ __device__ void CombineIntraNodeLLTyped(EpDispatchCombineArgs<T>
       if (destNode == myNode) {
         int srcPe;
         size_t srcSlot;
-        CombineIntraSrc<UseP2PWrite>(config, myPe, myNode, destPe, destTokId, tokenId, srcPe,
-                                     srcSlot);
+        CombineIntraSrc(config, myPe, myNode, destPe, destTokId, tokenId, useP2PWrite,
+                        srcPe, srcSlot);
         srcPtrs[laneId] = args.interNodeV1TokBufs.combineInp->template GetAs<TokT*>(srcPe) +
                           srcSlot * hiddenDim + hiddenDimOffset;
         srcWeightsPtr[laneId] = args.shmemInpWeightsMemObj->template GetAs<float*>(srcPe) +
@@ -1006,13 +1006,13 @@ __forceinline__ __device__ void CombineIntraNodeLLTyped(EpDispatchCombineArgs<T>
 // one 4B read of dispTokIdToSrcTokId on the expert PE -- an xGMI read, but 4 bytes
 // issued once per (token, expert) ahead of the gather, against the 12KB payload
 // read it replaces.
-template <bool UseP2PWrite, typename T>
+template <typename T>
 __forceinline__ __device__ void CombineInterSrc(const EpDispatchCombineArgs<T>& args, int myPe,
                                                 int destPe, index_t destTokId, int ownerNode,
-                                                int& srcPe, size_t& srcSlot) {
+                                                bool useP2PWrite, int& srcPe, size_t& srcSlot) {
   const EpDispatchCombineConfig& config = args.config;
   index_t destLocalTokId = LocalTokIdFromFlatTokenIndex(config, destTokId);
-  if constexpr (UseP2PWrite) {
+  if (useP2PWrite) {
     index_t srcFlat =
         args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(destPe)[destLocalTokId];
     srcPe = myPe;
@@ -1024,10 +1024,10 @@ __forceinline__ __device__ void CombineInterSrc(const EpDispatchCombineArgs<T>& 
   }
 }
 
-template <typename TokT, bool UseP2PWrite, typename T>
+template <typename TokT, typename T>
 __forceinline__ __device__ void CombineInterNodeTyped(EpDispatchCombineArgs<T>& args,
                                                       size_t tokHiddenBytes,
-                                                      size_t tokCombXferBytes) {
+                                                      size_t tokCombXferBytes, bool useP2PWrite) {
   DEF_COMMON_VARS;
 
   constexpr int numRecvBlock = 8;
@@ -1103,7 +1103,7 @@ __forceinline__ __device__ void CombineInterNodeTyped(EpDispatchCombineArgs<T>& 
                 if (destNode == myNode) {
                   int srcPe;
                   size_t srcSlot;
-                  CombineInterSrc<UseP2PWrite>(args, myPe, destPe, destTokId, node, srcPe, srcSlot);
+                  CombineInterSrc(args, myPe, destPe, destTokId, node, useP2PWrite, srcPe, srcSlot);
                   srcPtrs[laneId] =
                       args.interNodeV1TokBufs.combineInp->template GetAs<TokT*>(srcPe) +
                       srcSlot * hiddenDim;
@@ -1201,10 +1201,10 @@ __forceinline__ __device__ void CombineInterNodeTyped(EpDispatchCombineArgs<T>& 
   }
 }
 
-template <typename TokT, bool UseP2PWrite, typename T>
+template <typename TokT, typename T>
 __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>& args,
                                                         size_t tokHiddenBytes,
-                                                        size_t tokCombXferBytes) {
+                                                        size_t tokCombXferBytes, bool useP2PWrite) {
   DEF_COMMON_VARS;
 
   constexpr int numRecvBlock = 8;
@@ -1266,7 +1266,7 @@ __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>
           if (destNode == myNode) {
             int srcPe;
             size_t srcSlot;
-            CombineInterSrc<UseP2PWrite>(args, myPe, destPe, destTokId, node, srcPe, srcSlot);
+            CombineInterSrc(args, myPe, destPe, destTokId, node, useP2PWrite, srcPe, srcSlot);
             srcPtrs[laneId] = args.interNodeV1TokBufs.combineInp->template GetAs<TokT*>(srcPe) +
                               srcSlot * hiddenDim + hiddenDimOffset;
             srcWeightsPtr[laneId] = args.shmemInpWeightsMemObj->template GetAs<float*>(srcPe) +
@@ -1365,17 +1365,11 @@ inline __device__ void CombineIntraNode(EpDispatchCombineArgs<T>& args) {
     const size_t tokHiddenBytes = hiddenDim * sizeof(TokT);
     const size_t tokCombXferBytes =
         (args.weightsBuf == nullptr) ? tokHiddenBytes : tokHiddenBytes + weightBytes;
-    if (push)
-      combine_impl::CombineIntraNodeTyped<TokT, true>(args, tokHiddenBytes, tokCombXferBytes);
-    else
-      combine_impl::CombineIntraNodeTyped<TokT, false>(args, tokHiddenBytes, tokCombXferBytes);
+    combine_impl::CombineIntraNodeTyped<TokT>(args, tokHiddenBytes, tokCombXferBytes, push);
     return;
   }
 
-  if (push)
-    combine_impl::CombineIntraNodeTyped<T, true>(args, hiddenBytes, combXferBytes);
-  else
-    combine_impl::CombineIntraNodeTyped<T, false>(args, hiddenBytes, combXferBytes);
+  combine_impl::CombineIntraNodeTyped<T>(args, hiddenBytes, combXferBytes, push);
 }
 
 template <typename T>
@@ -1392,16 +1386,10 @@ inline __device__ void CombineIntraNodeLL(EpDispatchCombineArgs<T>& args) {
     const size_t tokHiddenBytes = hiddenDim * sizeof(TokT);
     const size_t tokCombXferBytes =
         (args.weightsBuf == nullptr) ? tokHiddenBytes : tokHiddenBytes + weightBytes;
-    if (push)
-      combine_impl::CombineIntraNodeLLTyped<TokT, true>(args, tokHiddenBytes, tokCombXferBytes);
-    else
-      combine_impl::CombineIntraNodeLLTyped<TokT, false>(args, tokHiddenBytes, tokCombXferBytes);
+    combine_impl::CombineIntraNodeLLTyped<TokT>(args, tokHiddenBytes, tokCombXferBytes, push);
     return;
   }
-  if (push)
-    combine_impl::CombineIntraNodeLLTyped<T, true>(args, hiddenBytes, combXferBytes);
-  else
-    combine_impl::CombineIntraNodeLLTyped<T, false>(args, hiddenBytes, combXferBytes);
+  combine_impl::CombineIntraNodeLLTyped<T>(args, hiddenBytes, combXferBytes, push);
 }
 
 template <typename T>
@@ -1418,16 +1406,10 @@ inline __device__ void CombineInterNode(EpDispatchCombineArgs<T>& args) {
     const size_t tokHiddenBytes = hiddenDim * sizeof(TokT);
     const size_t tokCombXferBytes =
         (args.weightsBuf == nullptr) ? tokHiddenBytes : tokHiddenBytes + weightBytes;
-    if (push)
-      combine_impl::CombineInterNodeTyped<TokT, true>(args, tokHiddenBytes, tokCombXferBytes);
-    else
-      combine_impl::CombineInterNodeTyped<TokT, false>(args, tokHiddenBytes, tokCombXferBytes);
+    combine_impl::CombineInterNodeTyped<TokT>(args, tokHiddenBytes, tokCombXferBytes, push);
     return;
   }
-  if (push)
-    combine_impl::CombineInterNodeTyped<T, true>(args, hiddenBytes, combXferBytes);
-  else
-    combine_impl::CombineInterNodeTyped<T, false>(args, hiddenBytes, combXferBytes);
+  combine_impl::CombineInterNodeTyped<T>(args, hiddenBytes, combXferBytes, push);
 }
 
 template <typename T>
@@ -1442,16 +1424,10 @@ inline __device__ void CombineInterNodeLL(EpDispatchCombineArgs<T>& args) {
     const size_t tokHiddenBytes = hiddenDim * sizeof(TokT);
     const size_t tokCombXferBytes =
         (args.weightsBuf == nullptr) ? tokHiddenBytes : tokHiddenBytes + weightBytes;
-    if (push)
-      combine_impl::CombineInterNodeLLTyped<TokT, true>(args, tokHiddenBytes, tokCombXferBytes);
-    else
-      combine_impl::CombineInterNodeLLTyped<TokT, false>(args, tokHiddenBytes, tokCombXferBytes);
+    combine_impl::CombineInterNodeLLTyped<TokT>(args, tokHiddenBytes, tokCombXferBytes, push);
     return;
   }
-  if (push)
-    combine_impl::CombineInterNodeLLTyped<T, true>(args, hiddenBytes, combXferBytes);
-  else
-    combine_impl::CombineInterNodeLLTyped<T, false>(args, hiddenBytes, combXferBytes);
+  combine_impl::CombineInterNodeLLTyped<T>(args, hiddenBytes, combXferBytes, push);
 }
 }  // namespace v1
 
