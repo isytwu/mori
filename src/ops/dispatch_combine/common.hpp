@@ -66,7 +66,7 @@ inline __device__ int NullSendBufSlotOffset(const EpDispatchCombineConfig& confi
 struct MultiWarpIter {
   int warpsPerItem;
   size_t dimPerWarp;
-  size_t dimSize;
+  size_t dimSize;//就是hidden dim
 
   // dimGranularity rounds dimPerWarp up to a multiple of itself, so callers doing
   // vectorized loads get every warp's slice starting on a vector boundary and
@@ -74,9 +74,9 @@ struct MultiWarpIter {
   inline __device__ MultiWarpIter(int globalWarpNum, int numItems, size_t dimSize_,
                                   size_t dimGranularity = 1)
       : dimSize(dimSize_) {
-    warpsPerItem = (globalWarpNum + numItems - 1) / numItems;
-    dimPerWarp = (dimSize + warpsPerItem - 1) / warpsPerItem;
-    if (dimGranularity > 1) {
+    warpsPerItem = (globalWarpNum + numItems - 1) / numItems;// 一个 token 分给几个 warp
+    dimPerWarp = (dimSize + warpsPerItem - 1) / warpsPerItem;// 一个 warp 负责多少元素
+    if (dimGranularity > 1) {//把切片向上取整到 vecStep 的整数倍
       dimPerWarp = ((dimPerWarp + dimGranularity - 1) / dimGranularity) * dimGranularity;
       // A coarser slice means fewer warps are actually needed; keep warpsPerItem
       // consistent with dimPerWarp or the tail warps decode to empty ranges.
@@ -86,10 +86,10 @@ struct MultiWarpIter {
 
   inline __device__ void Decode(int i, int& itemId, int& inItemPartId, size_t& dimOffset,
                                 size_t& dimChunk) const {
-    itemId = i / warpsPerItem;
-    inItemPartId = i % warpsPerItem;
-    dimOffset = (size_t)inItemPartId * dimPerWarp;
-    dimChunk = (dimOffset < dimSize) ? std::min(dimSize - dimOffset, dimPerWarp) : size_t{0};
+    itemId = i / warpsPerItem;//处理哪个token
+    inItemPartId = i % warpsPerItem;//token内的第几片
+    dimOffset = (size_t)inItemPartId * dimPerWarp;//token内我的起点
+    dimChunk = (dimOffset < dimSize) ? std::min(dimSize - dimOffset, dimPerWarp) : size_t{0};//token内我的长度
   }
 };
 

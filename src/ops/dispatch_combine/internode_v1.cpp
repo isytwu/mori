@@ -55,11 +55,11 @@ inline __device__ void DispatchIntraNodeBlock(EpDispatchCombineArgs<T>& args, in
       destTokId = atomicAdd(args.dispTokOffsetMemObj->template GetAs<index_t*>(destPe), 1);
       assert(destTokId < config.MaxNumTokensToRecv() &&
              "Total recv token overflow: increase maxTotalRecvTokens");
-      args.dispDestTokIdMap[tokenExpertId] = FlatTokenIndex(config, destPe, destTokId);
+      args.dispDestTokIdMap[tokenExpertId] = FlatTokenIndex(config, destPe, destTokId);// MAP 本机直达的map
 
       core::AtomicStoreRelaxedSystem(
           args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(destPe) + destTokId,
-          static_cast<index_t>(FlatTokenIndex(config, config.rank, tokenId)));
+          static_cast<index_t>(FlatTokenIndex(config, config.rank, tokenId)));  // srcTokId
     }
     destTokId = __shfl(destTokId, 0);
   } else {
@@ -94,7 +94,7 @@ inline __device__ void DispatchIntraNodeBlock(EpDispatchCombineArgs<T>& args, in
 }
 
 template <typename T>
-inline __device__ void DispatchIntraNode(EpDispatchCombineArgs<T>& args) {
+inline __device__ void DispatchIntraNode(EpDispatchCombineArgs<T>& args) {//非rdma block并行做本机直达
   DEF_COMMON_VARS;
   IF_ENABLE_PROFILER(
       INTERNODE_V1_PROFILER_INIT_CONTEXT(profiler, args.profilerConfig, globalWarpId, laneId));
@@ -102,7 +102,7 @@ inline __device__ void DispatchIntraNode(EpDispatchCombineArgs<T>& args) {
 
   int blockOffset = args.rdmaBlockNum;
   int xgmiBlockNum = blockNum - args.rdmaBlockNum;
-  int tokenPerBlock = (args.curRankNumToken + xgmiBlockNum - 1) / xgmiBlockNum;
+  int tokenPerBlock = (args.curRankNumToken + xgmiBlockNum - 1) / xgmiBlockNum;//block均分token
   int startTokenIdx = (blockId - blockOffset) * tokenPerBlock;
   int endTokenIdx = std::min(startTokenIdx + tokenPerBlock, args.curRankNumToken);
 
@@ -134,7 +134,8 @@ inline __device__ void DispatchIntraNode(EpDispatchCombineArgs<T>& args) {
     if (destNode == myNode) {
       if (__any((laneId < inTokenExpertId) && (destPe == lanePe))) {
         if (!args.replayMode && laneId == 0)
-          args.dispDestTokIdMap[expertOffset] = NullFlatTokenIndex(config);
+          args.dispDestTokIdMap[expertOffset] =
+              NullFlatTokenIndex(config);  // DispatchIntraNodeBlock里会赋值
         continue;
       }
       DispatchIntraNodeBlock(args, tokenId, inTokenExpertId, destPe, localPeTokenCounter);
@@ -297,11 +298,11 @@ inline __device__ void DispatchInterNodeLLSend(EpDispatchCombineArgs<T>& args) {
   // Then send to other nodes
   int maxChunkNum = core::CeilDiv(config.MaxNumTokensToSendPerRank(), warpSize);
   int totalChunkNum = core::CeilDiv(args.curRankNumToken, warpSize);
-  int blockChunkNum = core::CeilDiv(totalChunkNum, args.rdmaBlockNum);
+  int blockChunkNum = core::CeilDiv(totalChunkNum, args.rdmaBlockNum);//block均分chunk
   int chunkStartTokenIdx = blockChunkNum * blockId * warpSize;
   int chunkEndTokenIdx =
       std::min(chunkStartTokenIdx + blockChunkNum * warpSize, args.curRankNumToken);
-  for (int i = warpId; i < nNodes; i += warpNum) {
+  for (int i = warpId; i < nNodes; i += warpNum) {//一个warp处理一个node
     if (i == myNode) continue;
     int proxyPe = i * config.gpuPerNode + (config.rank % config.gpuPerNode);
 
@@ -310,7 +311,7 @@ inline __device__ void DispatchInterNodeLLSend(EpDispatchCombineArgs<T>& args) {
       bool shouldSend = false;
       for (int e = 0; e < config.numExpertPerToken; e++) {
         int destNode = args.tokenIndices[tokenId * numExpertPerToken + e] /
-                       config.numExpertPerRank / config.gpuPerNode;
+                       config.numExpertPerRank / config.gpuPerNode;// TODO 没有先判 < 0。当 expert = -1 时整数除法截断得 destNode == 0，于是在 i == 0 && myNode != 0 的循环里会给该槽写 Null。结果碰巧和 IntraNode 写的值相同（都是 Null）所以无害，但非 LL 的 DEDUP 版本 :173 明确加了 if (laneExpert < 0) continue;。属于 LL 路径没跟上的一处。
         if (destNode == i) {
           shouldSend |= true;
           args.dispDestTokIdMap[tokenId * numExpertPerToken + e] = NullFlatTokenIndex(config);
@@ -319,7 +320,7 @@ inline __device__ void DispatchInterNodeLLSend(EpDispatchCombineArgs<T>& args) {
 
       index_t flagSlotId = 0;
       if (laneId == 0) {
-        flagSlotId = atomicAdd(args.blockFlagCounter + i, 1);
+        flagSlotId = atomicAdd(args.blockFlagCounter + i, 1);//为warp负责的chunk取号；blockFlagCounter统计的是发送到node i的chunk数
       }
       flagSlotId = __shfl(flagSlotId, 0);
 
@@ -327,7 +328,7 @@ inline __device__ void DispatchInterNodeLLSend(EpDispatchCombineArgs<T>& args) {
       index_t destTokId = destTokIdOffset + laneId;
 
       size_t remoteIdx = SendBufSlotOffset(config, myNode, destTokId);
-      if (laneId == 0) {
+      if (laneId == 0) {//LL是64 token的chunk全发，不管topk index是否真的需要发
         index_t tokenNum = std::min(tokenId + warpSize, chunkEndTokenIdx) - tokenId;
         size_t stagingTokOffset = tokenId * xferBytes;
         int qpId = (tokenId / warpSize) % config.numQpPerPe;
@@ -338,7 +339,7 @@ inline __device__ void DispatchInterNodeLLSend(EpDispatchCombineArgs<T>& args) {
             args.interNodeChunkFlagMemObj, (myNode * maxChunkNum + flagSlotId) * sizeof(uint64_t),
             tokenNum + 1, core::atomicType::AMO_ADD, proxyPe, qpId);
       }
-      if (shouldSend) args.interNodeDispSendMap[nNodes * tokenId + i] = destTokId;
+      if (shouldSend) args.interNodeDispSendMap[nNodes * tokenId + i] = destTokId;// MAP 跨机
     }
   }
 
@@ -349,7 +350,7 @@ inline __device__ void DispatchInterNodeLLSend(EpDispatchCombineArgs<T>& args) {
     if (laneId < nNodes) {
       int proxyPe = laneId * config.gpuPerNode + (config.rank % config.gpuPerNode);
       index_t numTokenSignal =
-          core::AtomicLoadRelaxed(args.blockFlagCounter + laneId) * warpSize + 1;
+          core::AtomicLoadRelaxed(args.blockFlagCounter + laneId) * warpSize + 1;//blockFlagCounter是chunk发送的数；发送到该node的总token数+1
       shmem::ShmemAtomicTypeNonFetchThread<uint64_t>(args.nodeRecvTokenNumMemObj,
                                                      myNode * sizeof(uint64_t), numTokenSignal,
                                                      core::AMO_ADD, proxyPe);
@@ -481,7 +482,7 @@ inline __device__ void DispatchInterNodeRecv(EpDispatchCombineArgs<T>& args) {
 }
 
 template <typename T>
-inline __device__ void DispatchInterNodeLLRecv(EpDispatchCombineArgs<T>& args) {
+inline __device__ void DispatchInterNodeLLRecv(EpDispatchCombineArgs<T>& args) {//收+机内转发
   DEF_COMMON_VARS;
   IF_ENABLE_PROFILER(
       INTERNODE_V1_PROFILER_INIT_CONTEXT(profiler, args.profilerConfig, globalWarpId, laneId));
@@ -498,13 +499,14 @@ inline __device__ void DispatchInterNodeLLRecv(EpDispatchCombineArgs<T>& args) {
   // expert -> token -> node
   for (int i = globalWarpId;
        i < config.MaxNumTokensToSendPerRank() * config.numExpertPerToken * (nNodes - 1);
-       i += args.rdmaBlockNum * warpNum) {
+       i += args.rdmaBlockNum * warpNum) {//一个 warp = 一个 (源node, token slot, 第几个专家) 三元组
     int expertId = i % config.numExpertPerToken;
     int tokenId = i / config.numExpertPerToken % config.MaxNumTokensToSendPerRank();
     int nodeId = i / config.numExpertPerToken / config.MaxNumTokensToSendPerRank();
 
     int node = (myNode + 1 + nodeId) % nNodes;
-    int k = tokenId / warpSize;
+    int k = tokenId / warpSize;  // 同一 chunk 的 64×numExpertPerToken 个 warp 都在自旋同一个
+                                 // flag；用海量 poller 换取"数据一落地就立刻有 warp 接手"
     int startTokenIdx = k * warpSize;
 
     // Poll completion flags
@@ -539,30 +541,30 @@ inline __device__ void DispatchInterNodeLLRecv(EpDispatchCombineArgs<T>& args) {
         reinterpret_cast<index_t*>(stagingPtr + globalTokenId * xferBytes + hiddenBytes +
                                    indexBytes + weightBytes + scaleBytes)[0];
 
-    int destPe = __shfl(lanePe, expertId);
+    int destPe = __shfl(lanePe, expertId);  // 取第 expertId 个专家的宿主 PE
     int destNode = destPe / config.gpuPerNode;
     // HSA-RCA Signature 1 guard (mirror of the :396 site): out-of-range destPe
     // (assert at :493 stripped under NDEBUG) is dropped instead of writing OOB.
     bool peOutOfRange = (destPe < 0) || (destPe >= config.worldSize);
     bool shouldSkip =
-        peOutOfRange || (destNode != myNode) || __any((laneId < expertId) && (destPe == lanePe));
+        peOutOfRange || (destNode != myNode) || __any((laneId < expertId) && (destPe == lanePe));//越界；非本node token；去重
     if (shouldSkip) {
       if (laneId == 0)
         args.interNodeDispDestTokIdMap[globalTokenId * config.numExpertPerToken + expertId] =
             NullFlatTokenIndex(config);
       continue;
     }
-
+//一个warp处理一个topk index里一个格子的转发
     int destTokId = 0;
     if (laneId == 0) {
-      destTokId = atomicAdd(args.dispTokOffsetMemObj->template GetAs<index_t*>(destPe), 1);
+      destTokId = atomicAdd(args.dispTokOffsetMemObj->template GetAs<index_t*>(destPe), 1);//远端取号
       assert(destTokId < config.MaxNumTokensToRecv() &&
              "Total recv token overflow: increase maxTotalRecvTokens");
       args.interNodeDispDestTokIdMap[globalTokenId * config.numExpertPerToken + expertId] =
-          FlatTokenIndex(config, destPe, destTokId);
+          FlatTokenIndex(config, destPe, destTokId);// MAP topk index的序号 映射到 转发的位置
       args.dispTokIdToSrcTokIdMemObj->template GetAs<index_t*>(destPe)[destTokId] = srcTokId;
     }
-    if ((destPe % config.gpuPerNode) == laneId) localPeTokenCounter++;
+    if ((destPe % config.gpuPerNode) == laneId) localPeTokenCounter++;//统计给每个peer转发了多少？
     destTokId = __shfl(destTokId, 0);
     core::WarpCopy<uint8_t, 4>(
         args.interNodeV1TokBufs.dispatchOut->template GetAs<uint8_t*>(destPe) +
@@ -585,12 +587,12 @@ inline __device__ void DispatchInterNodeLLRecv(EpDispatchCombineArgs<T>& args) {
 
   if (laneId < config.gpuPerNode) {
     int destPe = myNode * config.gpuPerNode + laneId;
-    int counter = atomicAdd(args.destPeTokenCounter + destPe, localPeTokenCounter);
+    int counter = atomicAdd(args.destPeTokenCounter + destPe, localPeTokenCounter);//记录给destPe转发了多少token
   }
 }
 
 template <typename T>
-inline __device__ void DispatchSync(EpDispatchCombineArgs<T>& args) {
+inline __device__ void DispatchSync(EpDispatchCombineArgs<T>& args) {//所有block同步，纯机内barrier
   DEF_COMMON_VARS;
   IF_ENABLE_PROFILER(
       INTERNODE_V1_PROFILER_INIT_CONTEXT(profiler, args.profilerConfig, globalWarpId, laneId));
@@ -600,8 +602,8 @@ inline __device__ void DispatchSync(EpDispatchCombineArgs<T>& args) {
   int finishedWarp = 0;
   if (laneId == 0) finishedWarp = atomicAdd(args.dispatchGridBarrier, 1);
   finishedWarp = __shfl(finishedWarp, 0);
-  if ((finishedWarp + 1) == globalWarpNum) {
-    if (laneId < config.gpuPerNode) {
+  if ((finishedWarp + 1) == globalWarpNum) {//全grid里最后一个进入的warp
+    if (laneId < config.gpuPerNode) {//告诉本机每个 GPU"我给了你多少 token"（纯 XGMI store）
       int destPe = myNode * config.gpuPerNode + laneId;
       index_t numTokenSignal = core::AtomicLoadSeqCstSystem(args.destPeTokenCounter + destPe) + 1;
       index_t* signal = args.recvTokenNumMemObj->template GetAs<index_t*>(destPe) + myPe;
@@ -615,7 +617,7 @@ inline __device__ void DispatchSync(EpDispatchCombineArgs<T>& args) {
          destPe += warpSize) {
       index_t* signal = recvTokenNums + destPe;
       index_t recvTokenNum = shmem::ShmemInt32WaitUntilGreaterThan(signal, 0) - 1;
-      atomicAdd(args.totalRecvTokenNum, recvTokenNum);
+      atomicAdd(args.totalRecvTokenNum, recvTokenNum);  // 收齐本机所有 GPU 给我的计数
       __threadfence_system();
       // reset local counter
       core::AtomicStoreSeqCstSystem(signal, 0);
@@ -676,8 +678,8 @@ __device__ void EpDispatchCopyToStaging_body(EpDispatchCombineArgs<T> args) {
     core::WarpCopy<uint8_t, 4>(stagingPtr + stagingTokOffset + hiddenDimOffset * sizeof(T),
                                reinterpret_cast<uint8_t*>(args.inpTokenBuf) +
                                    tokenId * hiddenBytes + hiddenDimOffset * sizeof(T),
-                               hiddenDimSize * sizeof(T));
-    if (inTokenPartId != 0) continue;
+                               hiddenDimSize * sizeof(T));//多个 warp 协作切一个 token 的 hidden dim
+    if (inTokenPartId != 0) continue;//其他就不需要多warp协同搬运了
     core::WarpCopy<uint8_t, 4>(stagingPtr + stagingTokOffset + hiddenBytes,
                                reinterpret_cast<uint8_t*>(args.tokenIndices) + tokenId * indexBytes,
                                indexBytes);
@@ -705,9 +707,9 @@ __device__ void EpDispatchInterNodeV1KernelLowLatency_body(EpDispatchCombineArgs
   DEF_COMMON_VARS;
   if (blockId < args.rdmaBlockNum) {
     v1::DispatchInterNodeLLSend<T>(args);
-    v1::DispatchInterNodeLLRecv(args);
+    v1::DispatchInterNodeLLRecv(args);//RDMA收+机内XGMI转发
   } else {
-    v1::DispatchIntraNode(args);
+    v1::DispatchIntraNode(args);//直接XGMI写对端
   }
   v1::DispatchSync(args);
 
@@ -735,8 +737,8 @@ inline __device__ void CombineSync(EpDispatchCombineArgs<T>& args) {
       INTERNODE_V1_PROFILER_INIT_CONTEXT(profiler, args.profilerConfig, globalWarpId, laneId));
   MORI_TRACE_SPAN(profiler, Slot::CombineSync);
 
-  index_t totalRecvTokenNum = args.totalRecvTokenNum[0];
-  int tokenPerBlock = core::CeilDiv(totalRecvTokenNum, blockNum);
+  index_t totalRecvTokenNum = args.totalRecvTokenNum[0];//dispatch输出的token大小
+  int tokenPerBlock = core::CeilDiv(totalRecvTokenNum, blockNum);  // 按block切分
   int startTokenIdx = blockId * tokenPerBlock;
   int endTokenIdx = std::min(startTokenIdx + tokenPerBlock, totalRecvTokenNum);
 #ifndef ENABLE_STANDARD_MOE_ADAPT
@@ -862,7 +864,7 @@ __forceinline__ __device__ void CombineIntraNodeTyped(EpDispatchCombineArgs<T>& 
 template <typename TokT, typename T>
 __forceinline__ __device__ void CombineIntraNodeLLTyped(EpDispatchCombineArgs<T>& args,
                                                         size_t tokHiddenBytes,
-                                                        size_t tokCombXferBytes) {
+                                                        size_t tokCombXferBytes) {//单机 非rdma block
   DEF_COMMON_VARS;
 
   // Distribute tokens evenly to all blocks
@@ -875,7 +877,7 @@ __forceinline__ __device__ void CombineIntraNodeLLTyped(EpDispatchCombineArgs<T>
   float** srcWeightsPtr = reinterpret_cast<float**>(sharedMem) +
                           warpNum * config.numExpertPerToken + warpId * config.numExpertPerToken;
   uint8_t* stagingPtr = args.interNodeV1TokBufs.staging->template GetAs<uint8_t*>() +
-                        SendBufSlotOffset(config, nNodes + myNode, 0) * tokCombXferBytes;
+                        SendBufSlotOffset(config, nNodes + myNode, 0) * tokCombXferBytes;// reduce的dest，这里只reduce本机非RDMA+转发路径的
 
   // Slices are snapped to a whole vector step so the gather below stays on
   // WarpAccumLF's vector path instead of its scalar tail.
@@ -892,10 +894,10 @@ __forceinline__ __device__ void CombineIntraNodeLLTyped(EpDispatchCombineArgs<T>
     if (laneId < config.numExpertPerToken) {
       srcPtrs[laneId] = nullptr;
       srcWeightsPtr[laneId] = nullptr;
-      index_t destTokId = args.dispDestTokIdMap[tokenId * config.numExpertPerToken + laneId];
+      index_t destTokId = args.dispDestTokIdMap[tokenId * config.numExpertPerToken + laneId];//用MAP 机内直达map
       index_t destPe = PeFromFlatTokenIndex(config, destTokId);
       index_t destNode = destPe / config.gpuPerNode;
-      if (destNode == myNode) {
+      if (destNode == myNode) {  // 只要本节点的
         index_t destLocalTokId = LocalTokIdFromFlatTokenIndex(config, destTokId);
         srcPtrs[laneId] = args.interNodeV1TokBufs.combineInp->template GetAs<TokT*>(destPe) +
                           destLocalTokId * hiddenDim + hiddenDimOffset;
@@ -905,7 +907,7 @@ __forceinline__ __device__ void CombineIntraNodeLLTyped(EpDispatchCombineArgs<T>
     }
     CombineGather<TokT>(
         reinterpret_cast<TokT*>(stagingPtr + tokenId * tokCombXferBytes) + hiddenDimOffset, srcPtrs,
-        config.numExpertPerToken, hiddenDimSize, vecAligned);
+        config.numExpertPerToken, hiddenDimSize, vecAligned);// TODO gather换个名字
     if (args.weightsBuf && (inTokenPartId == mwIter.warpsPerItem - 1)) {
       core::WarpAccum<float, 4>(
           reinterpret_cast<float*>(stagingPtr + tokenId * tokCombXferBytes + tokHiddenBytes),
@@ -1092,14 +1094,14 @@ __forceinline__ __device__ void CombineInterNodeTyped(EpDispatchCombineArgs<T>& 
 template <typename TokT, typename T>
 __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>& args,
                                                         size_t tokHiddenBytes,
-                                                        size_t tokCombXferBytes) {
+                                                        size_t tokCombXferBytes) {// rdma block参与 帮别人reduce然后发chunk
   DEF_COMMON_VARS;
 
   constexpr int numRecvBlock = 8;
   int maxChunkNum = core::CeilDiv(config.MaxNumTokensToSendPerRank(), warpSize);
 
-  uint64_t* chunkFlag = args.interNodeChunkFlagMemObj->template GetAs<uint64_t*>();
-  uint64_t* nodeRecvTokenNum = args.nodeRecvTokenNumMemObj->template GetAs<uint64_t*>();
+  uint64_t* chunkFlag = args.interNodeChunkFlagMemObj->template GetAs<uint64_t*>();//dispatch存的chunk的signal
+  uint64_t* nodeRecvTokenNum = args.nodeRecvTokenNumMemObj->template GetAs<uint64_t*>();//dispatch存的
 
   extern __shared__ char sharedMem[];
   TokT** srcPtrs = reinterpret_cast<TokT**>(sharedMem) + warpId * config.numExpertPerToken;
@@ -1110,10 +1112,10 @@ __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>
   int rdmaWarpNum = args.rdmaBlockNum * warpNum;
   for (int n = 0; n < (nNodes - 1); n++) {
     int node = (myNode + n + 1) % nNodes;
-    uint64_t nodeCount = nodeRecvTokenNum[node];
+    uint64_t nodeCount = nodeRecvTokenNum[node];//表示该node发给我的token总数
     if (nodeCount > 0) nodeCount -= 1;
     if (nodeCount == 0) continue;
-
+// warpsPerToken 始终是hidden dim的份数
     // One whole vector step per warp. warpsPerToken was a fixed 4, which for
     // hidden 6144 bf16 gives a 1536-element slice -- one full 1024-element vector
     // step plus a 512-element scalar tail, and that tail costs more than the
@@ -1132,9 +1134,9 @@ __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>
 
     for (int i = globalWarpId; i < (nodeCount * warpsPerToken); i += rdmaWarpNum) {
       int tokenId = i / warpsPerToken;
-      int k = tokenId / warpSize;
+      int k = tokenId / warpSize;//k是chunk id
       int startTokenIdx = k * warpSize;
-      uint64_t thisChunkTokenNum = chunkFlag[node * maxChunkNum + k];
+      uint64_t thisChunkTokenNum = chunkFlag[node * maxChunkNum + k];//实际chunk的token数
       thisChunkTokenNum -= (thisChunkTokenNum > 0) ? 1 : 0;
       if ((tokenId - startTokenIdx) < thisChunkTokenNum) {
         int inTokenPartId = i % warpsPerToken;
@@ -1143,12 +1145,12 @@ __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>
                                    ? std::min(hiddenDim - hiddenDimOffset, hiddenDimPerWarp)
                                    : size_t{0};
 
-        int globalTokenId = SendBufSlotOffset(config, node, tokenId);
+        int globalTokenId = SendBufSlotOffset(config, node, tokenId);// dest是interNodeV1TokBufs.staging的前半部分，对应node的位置（提该node从本机其他peer拉数据做reduce）
         if (laneId < config.numExpertPerToken) {
           srcPtrs[laneId] = nullptr;
           srcWeightsPtr[laneId] = nullptr;
           index_t destTokId =
-              args.interNodeDispDestTokIdMap[globalTokenId * config.numExpertPerToken + laneId];
+              args.interNodeDispDestTokIdMap[globalTokenId * config.numExpertPerToken + laneId];// 用MAP 转发的时候dispatch存的
           index_t destPe = PeFromFlatTokenIndex(config, destTokId);
           index_t destNode = destPe / config.gpuPerNode;
           if (destNode == myNode) {
@@ -1174,7 +1176,7 @@ __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>
       if (laneId == 0)
         finished = atomicAdd(&args.interNodeChunkFlagCombine[node * maxChunkNum + k], 1);
       finished = __shfl(finished, 0);
-      if ((finished + 1) >= (warpsPerToken * warpSize)) {
+      if ((finished + 1) >= (warpsPerToken * warpSize)) {  // 一个chunk最多有warpSize个token，每个token分配warpsPerToken个warp；这里表示该chunk上的最后一个warp进入 ⭕ chunk warp的同步
         if (laneId == 0) {
           core::AtomicStoreSeqCstSystem(
               args.interNodeChunkFlagMemObj->template GetAs<uint64_t*>() + node * maxChunkNum + k,
@@ -1186,10 +1188,10 @@ __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>
         int qpId = k % config.numQpPerPe;
         shmem::ShmemPutTypeNbiWarp<uint8_t>(
             args.interNodeV1TokBufs.staging,
-            SendBufSlotOffset(config, myNode + nNodes, startTokenIdx) * tokCombXferBytes,
+            SendBufSlotOffset(config, myNode + nNodes, startTokenIdx) * tokCombXferBytes,//dest GPU的后半部分用来收
             args.interNodeV1TokBufs.staging,
             SendBufSlotOffset(config, node, startTokenIdx) * tokCombXferBytes,
-            thisChunkTokenNum * tokCombXferBytes, proxyPe, qpId);
+            thisChunkTokenNum * tokCombXferBytes, proxyPe, qpId);// ⭕ reduce好的chunk直接发
       }
     }
   }
@@ -1207,7 +1209,7 @@ __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>
   finishedWarp = __shfl(finishedWarp, 0);
   barrierFlag = __shfl(barrierFlag, 0);
 
-  if ((finishedWarp + 1) == (args.rdmaBlockNum * warpNum)) {
+  if ((finishedWarp + 1) == (args.rdmaBlockNum * warpNum)) {//rdma block 同步
     if (laneId < nNodes) {
       core::AtomicStoreSeqCstSystem(
           args.nodeRecvTokenNumMemObj->template GetAs<uint64_t*>() + laneId, uint64_t{0});
@@ -1218,7 +1220,7 @@ __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>
       for (int i = 0; i < config.numQpPerPe; i++) {
         shmem::ShmemAtomicTypeNonFetchThread<uint64_t>(args.crossDeviceBarrierMemObj,
                                                        args.config.rank * sizeof(uint64_t), 1,
-                                                       core::AMO_ADD, proxyPe, i);
+                                                       core::AMO_ADD, proxyPe, i);//通知同号卡 ⭕ 跨机同号卡同步 每个qp上都去atomic add
       }
       __threadfence_system();
     }
@@ -1227,7 +1229,7 @@ __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>
     // Wait other nodes
     uint64_t* localBarrierPtr = args.crossDeviceBarrierMemObj->template GetAs<uint64_t*>();
     if ((laneId < nNodes) && (laneId != myNode)) {
-      int proxyPe = laneId * config.gpuPerNode + (config.rank % config.gpuPerNode);
+      int proxyPe = laneId * config.gpuPerNode + (config.rank % config.gpuPerNode);// poll所有的同号卡
       while (core::AtomicLoadRelaxedSystem(localBarrierPtr + proxyPe) !=
              (barrierFlag * config.numQpPerPe)) {
       }
@@ -1398,7 +1400,7 @@ __forceinline__ __device__ void EpCombineAllGeneric(EpDispatchCombineArgs<T>& ar
 
   MultiWarpIter mwIter(globalWarpNum, args.curRankNumToken, hiddenDim);
 
-  for (int i = globalWarpId; i < (args.curRankNumToken * mwIter.warpsPerItem); i += globalWarpNum) {
+  for (int i = globalWarpId; i < (args.curRankNumToken * mwIter.warpsPerItem); i += globalWarpNum) {//mwIter.warpsPerItem是一个token切给几个warp
     int tokenId, inTokenPartId;
     size_t hiddenDimOffset, hiddenDimSize;
     mwIter.Decode(i, tokenId, inTokenPartId, hiddenDimOffset, hiddenDimSize);
@@ -1419,7 +1421,7 @@ __forceinline__ __device__ void EpCombineAllGeneric(EpDispatchCombineArgs<T>& ar
 
     for (int n = 0; n < nNodes; n++) {
       if (__any(laneNode == n) && (laneId == 0)) {
-        int mappedId = (n == myNode) ? tokenId : args.interNodeDispSendMap[nNodes * tokenId + n];
+        int mappedId = (n == myNode) ? tokenId : args.interNodeDispSendMap[nNodes * tokenId + n];// 用MAP
         uint8_t* base = stagingPtr + SendBufSlotOffset(config, n, mappedId) * combXferBytes;
         srcPtrs[n] = reinterpret_cast<T*>(base) + hiddenDimOffset;
         srcWeightsPtrs[n] = reinterpret_cast<float*>(base + hiddenBytes);
@@ -1481,7 +1483,7 @@ __device__ void EpCombineInterNodeV1KernelLowLatency_body(EpDispatchCombineArgs<
   if (blockId < args.rdmaBlockNum) {
     v1::CombineInterNodeLL(args);
   } else {
-    v1::CombineIntraNodeLL(args);
+    v1::CombineIntraNodeLL(args);  // 机内
   }
 }
 
@@ -1502,7 +1504,7 @@ __global__ void EpCombineSync(EpDispatchCombineArgs<T> args) {
 }
 
 template <typename T>
-__device__ void EpCombineSyncBarrier_body(EpDispatchCombineArgs<T> args) {
+__device__ void EpCombineSyncBarrier_body(EpDispatchCombineArgs<T> args) {//机内barrier
   DEF_COMMON_VARS;
   IF_ENABLE_PROFILER(
       INTERNODE_V1_PROFILER_INIT_CONTEXT(profiler, args.profilerConfig, globalWarpId, laneId));
@@ -1512,7 +1514,7 @@ __device__ void EpCombineSyncBarrier_body(EpDispatchCombineArgs<T> args) {
     barrierFlag = core::AtomicLoadRelaxed(args.crossDeviceBarrierFlag);
   }
   barrierFlag = __shfl(barrierFlag, 0);
-  uint64_t* localBarrierPtr = args.crossDeviceBarrierMemObj->template GetAs<uint64_t*>();
+  uint64_t* localBarrierPtr = args.crossDeviceBarrierMemObj->template GetAs<uint64_t*>();// 机内8卡同步；因为下一步要直接跨 XGMI 读 peer 的 combineInp
   if (laneId < config.gpuPerNode) {
     int destPe = myNode * config.gpuPerNode + laneId;
     core::AtomicStoreRelaxedSystem(

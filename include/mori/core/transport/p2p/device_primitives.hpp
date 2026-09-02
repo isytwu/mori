@@ -588,7 +588,7 @@ template <typename T, int VecBytes, int AccumNum>
 __forceinline__ __device__ void WarpAccumImpl(T* __restrict__ dest, T* const* __restrict__ srcs,
                                               const float* __restrict__ srcScales, size_t& offset,
                                               size_t nelems) {
-  constexpr int vecSize = VecBytes / sizeof(T);
+  constexpr int vecSize = VecBytes / sizeof(T);//向量化：一个lane一次处理几个T元素
   using DataType = typename VecTypeSelector<VecBytes>::dataType;
 
   const int elemsPerWarp = warpSize * vecSize;
@@ -798,13 +798,13 @@ template <typename T, int VecBytes, int AccumNum, int Unroll>
 __forceinline__ __device__ void WarpAccumLFImpl(T* __restrict__ dest, T* const* __restrict__ srcs,
                                                 const float* __restrict__ srcScales, size_t& offset,
                                                 size_t nelems) {
-  constexpr int vecSize = VecBytes / sizeof(T);
+  constexpr int vecSize = VecBytes / sizeof(T);//一个lane处理几个T元素
   using DataType = typename VecTypeSelector<VecBytes>::dataType;
   using AccumFp32Type = std::conditional_t<std::is_same_v<T, mori_fp4x2_e2m1>, float2, float>;
 
   const int laneId = threadIdx.x & (warpSize - 1);
   const size_t laneOffset = laneId * vecSize;
-  const int elemsPerWarp = Unroll * warpSize * vecSize;
+  const int elemsPerWarp = Unroll * warpSize * vecSize;//一个warp推进多少T元素
   const size_t numIters = (nelems - offset) / elemsPerWarp;
 
   float scales[AccumNum];
