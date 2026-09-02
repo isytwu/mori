@@ -317,14 +317,18 @@ inline __device__ void DispatchInterNodeLLSend(EpDispatchCombineArgs<T>& args) {
         }
       }
 
-      index_t flagSlotId = 0;
-      if (laneId == 0) {
-        flagSlotId = atomicAdd(args.blockFlagCounter + i, 1);
-      }
-      flagSlotId = __shfl(flagSlotId, 0);
-
-      index_t destTokIdOffset = flagSlotId * warpSize;
-      index_t destTokId = destTokIdOffset + laneId;
+      // The flag slot is the token range's own index. It used to be handed out by
+      // an atomicAdd, i.e. in completion order, which left the receiver's chunk k
+      // holding whichever range happened to finish k-th. Combine can then only
+      // bound its loop by a chunk-aligned count, because it cannot tell how many
+      // tokens precede chunk k. Deriving the slot packs the ranges in token order,
+      // so chunk k always holds tokens [k*warpSize, ...) and combine can use the
+      // exact token count instead. It also drops a global atomic per range, and
+      // removes a latent addressing bug: in completion order a full range could
+      // land on a high slot and address past the rank's slice of the staging
+      // buffer whenever maxNumInpTokenPerRank was not a multiple of warpSize.
+      index_t flagSlotId = tokenId / warpSize;
+      index_t destTokId = flagSlotId * warpSize + laneId;
 
       size_t remoteIdx = SendBufSlotOffset(config, myNode, destTokId);
       if (laneId == 0) {
@@ -348,8 +352,12 @@ inline __device__ void DispatchInterNodeLLSend(EpDispatchCombineArgs<T>& args) {
   if ((finishedWarp + 1) == (args.rdmaBlockNum * warpNum)) {
     if (laneId < nNodes) {
       int proxyPe = laneId * config.gpuPerNode + (config.rank % config.gpuPerNode);
-      index_t numTokenSignal =
-          core::AtomicLoadRelaxed(args.blockFlagCounter + laneId) * warpSize + 1;
+      // Publish the exact token count, not the chunk-aligned one. It used to be
+      // read back out of blockFlagCounter and rounded up to a whole number of
+      // warpSize chunks, which made the peer's combine iterate over up to
+      // warpSize-1 token slots that hold nothing -- at 4 tokens/rank that is 60
+      // of every 64 iterations doing an atomicAdd and a shfl for no work.
+      index_t numTokenSignal = args.curRankNumToken + 1;
       shmem::ShmemAtomicTypeNonFetchThread<uint64_t>(args.nodeRecvTokenNumMemObj,
                                                      myNode * sizeof(uint64_t), numTokenSignal,
                                                      core::AMO_ADD, proxyPe);
@@ -1174,7 +1182,16 @@ __forceinline__ __device__ void CombineInterNodeLLTyped(EpDispatchCombineArgs<T>
       if (laneId == 0)
         finished = atomicAdd(&args.interNodeChunkFlagCombine[node * maxChunkNum + k], 1);
       finished = __shfl(finished, 0);
-      if ((finished + 1) >= (warpsPerToken * warpSize)) {
+      // Chunk k now gets exactly thisChunkTokenNum * warpsPerToken iterations,
+      // because nodeCount is the peer's exact token count and the send packs its
+      // ranges in token order. The target used to be the chunk-aligned
+      // warpsPerToken * warpSize, which forced nodeCount to be rounded up to
+      // match. Reading it per chunk is safe against the clear below: this load
+      // happens at the top of the iteration and the atomicAdd at the bottom, so
+      // any warp that has not read yet has not counted yet, and the count cannot
+      // have reached the target.
+      if (thisChunkTokenNum &&
+          ((finished + 1) >= (warpsPerToken * static_cast<int>(thisChunkTokenNum)))) {
         if (laneId == 0) {
           core::AtomicStoreSeqCstSystem(
               args.interNodeChunkFlagMemObj->template GetAs<uint64_t*>() + node * maxChunkNum + k,
