@@ -116,14 +116,31 @@ void ArmDataPlaneDeadline(grpc::ClientContext& ctx) {
 }
 
 // RegisterMemory is not a routine data-plane call: it is a one-time-per-buffer
-// setup RPC that can legitimately take 90-120+ seconds (observed directly:
+// setup RPC that can legitimately take many minutes (observed directly:
 // "[DRAMTier] host memory registered for GPU access: 1187840 MiB in 599.6 s"
 // for the bulk step, plus sequential per-GPU IPC handle registration each
-// well over a minute), so it needs its own, longer deadline rather than
-// DataPlaneRpcTimeoutMs()'s 10s.
+// well over a minute), so it needs its own, longer deadline than
+// DataPlaneRpcTimeoutMs().
+//
+// The default was 180s, which is SHORTER than the 599.6 s this very comment
+// records -- it would have fired on the case it was written to accommodate.
+// Two things make that worse than an ordinary mistuned timeout: registrations
+// across a node's ranks serialize against each other (PoolClient's
+// registration_mutex_, which is what IOEngine's unlocked memory table needs),
+// so a rank's observed latency is its own pin plus whatever its peers are
+// still doing; and a failure here is not a graceful degradation the way a
+// data-plane miss is -- the caller below throws, so a rank that trips this
+// does not come up at all.
+//
+// So this is a liveness bound, not a latency budget: it should only ever fire
+// on a server that is genuinely wedged. 30 minutes clears the documented bulk
+// figure with room for that cross-rank serialization; the knob is there for a
+// deployment whose pools are larger still. It must never be set below
+// UMBP_DATA_PLANE_RPC_TIMEOUT_MS -- registration is the strictly slower
+// operation, and inverting the two is the bug this replaced.
 int RegisterMemoryRpcTimeoutMs() {
   static const int v = static_cast<int>(
-      GetEnvMilliseconds("UMBP_REGISTER_MEMORY_RPC_TIMEOUT_MS", std::chrono::milliseconds(180000),
+      GetEnvMilliseconds("UMBP_REGISTER_MEMORY_RPC_TIMEOUT_MS", std::chrono::milliseconds(1800000),
                          /*min_allowed=*/1)
           .count());
   return v;
