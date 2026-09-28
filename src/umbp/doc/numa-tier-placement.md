@@ -74,11 +74,20 @@ the kernel back a buffer with another node's physical pages when necessary.
 Startup logs distinguish target placement from sampled physical placement.
 Failure to query placement is logged rather than inferred as success.
 
-Multi-node tiers prefault buffers in parallel with a total budget of at most
-16 workers. Large buffers can subdivide that budget into page-aligned chunks;
-small chunks stay serial. Prefault workers use the target node's allowed CPUs
-and restore their previous affinity. `UMBP_DRAM_PREFAULT=0` disables prefault.
-GPU registration and the transfer path are unchanged.
+Every tier of at least 64 MiB prefaults in parallel with a total budget of at
+most 16 workers (`UMBP_DRAM_PREFAULT_THREADS=1` restores the serial path).
+Large buffers can subdivide that budget into page-aligned chunks; small chunks
+stay serial. A bound buffer's workers run on its node's allowed CPUs. An
+unbound buffer's workers run on alternating nodes, so first touch spreads its
+chunks evenly across sockets instead of filling one node first. Workers restore
+their previous affinity. `UMBP_DRAM_PREFAULT=0` disables prefault.
+
+Each host buffer is registered for GPU access with one `hipHostRegister` call,
+whose cost grows faster than the buffer. An unbound tier larger than
+`UMBP_DRAM_MAX_REGION_BYTES` (default 256 GiB; `0` keeps one buffer) is therefore
+cut into equal buffers no larger than that limit. Transfers are planned per
+page, so no copy spans two buffers. A bound tier keeps exactly one buffer per
+node. The transfer path is unchanged.
 
 This policy favors locality over the opportunity to put an entire object in a
 remote contiguous run. Its net benefit depends on fragmentation and workload.

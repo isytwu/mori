@@ -614,8 +614,9 @@ bool ApplyBackendPolicy(const BackendPolicyConfig& policy, PoolClientConfig* con
         if (backend.tier == TierType::DRAM) {
           instance.dram = config->dram;
           instance.dram.numa_nodes = NormalizeNumaNodes(backend.numa_nodes);
-          instance.dram.buffer_sizes = SplitNumaCapacity(
-              backend.capacity_bytes, instance.dram.numa_nodes.size(), config->dram_page_size);
+          instance.dram.buffer_sizes =
+              SplitTierCapacity(backend.capacity_bytes, instance.dram.numa_nodes.size(),
+                                config->dram_page_size, config->dram.max_region_bytes);
         } else {
           if (backend.capacity_bytes > std::numeric_limits<size_t>::max()) {
             Invalid("backend '" + backend.name + "': capacity does not fit size_t");

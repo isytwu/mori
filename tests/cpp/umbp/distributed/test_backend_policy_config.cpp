@@ -46,6 +46,48 @@ TEST(BackendPolicyConfig, NumaListParsingAndCapacitySplitting) {
   EXPECT_THROW(SplitNumaCapacity(4096, 2, 4096), std::invalid_argument);
 }
 
+TEST(BackendPolicyConfig, UnboundTiersSplitAtTheRegionLimit) {
+  constexpr uint64_t kGiB = 1ULL << 30;
+  EXPECT_EQ(SplitTierCapacity(740 * kGiB, 0, 4096, 0), (std::vector<uint64_t>{740 * kGiB}));
+  EXPECT_EQ(SplitTierCapacity(200 * kGiB, 0, 4096, 256 * kGiB),
+            (std::vector<uint64_t>{200 * kGiB}));
+  const auto split = SplitTierCapacity(740'000'000'000ULL, 0, 65536, 256 * kGiB);
+  ASSERT_EQ(split.size(), 3u);
+  uint64_t total = 0;
+  for (size_t i = 0; i < split.size(); ++i) {
+    EXPECT_LE(split[i], 256 * kGiB);
+    if (i + 1 < split.size()) EXPECT_EQ(split[i] % 65536, 0u);
+    total += split[i];
+  }
+  EXPECT_EQ(total, 740'000'000'000ULL);
+  // Bound tiers keep one buffer per node whatever the limit.
+  EXPECT_EQ(SplitTierCapacity(740 * kGiB, 2, 4096, 256 * kGiB).size(), 2u);
+  EXPECT_EQ(SplitTierCapacity(740 * kGiB, 1, 4096, 256 * kGiB).size(), 1u);
+}
+
+TEST(BackendPolicyConfig, RegionLimitEnvironmentAndPolicyPath) {
+  unsetenv("UMBP_DRAM_MAX_REGION_BYTES");
+  EXPECT_EQ(UMBPConfig::FromEnvironment().dram.max_region_bytes, 256ULL << 30);
+  ASSERT_EQ(setenv("UMBP_DRAM_MAX_REGION_BYTES", "0", 1), 0);
+  EXPECT_EQ(UMBPConfig::FromEnvironment().dram.max_region_bytes, 0u);
+  ASSERT_EQ(setenv("UMBP_DRAM_MAX_REGION_BYTES", "4096", 1), 0);
+  EXPECT_THROW(UMBPConfig::FromEnvironment(), std::invalid_argument);
+  unsetenv("UMBP_DRAM_MAX_REGION_BYTES");
+
+  const char* json = R"({"schema_version":1,"backends":{
+    "dram":{"type":"dram","capacity":"1TiB"}},
+    "tiers":[{"name":"host","backends":{"dram":100}}],"entry_tier":"host"})";
+  auto loaded = LoadBackendPolicyJson(json);
+  ASSERT_TRUE(loaded.ok()) << loaded.error;
+  PoolClientConfig output;
+  output.dram_page_size = 4096;
+  output.dram.max_region_bytes = 256ULL << 30;
+  std::string error;
+  ASSERT_TRUE(ApplyBackendPolicy(*loaded.config, &output, &error)) << error;
+  ASSERT_EQ(output.backends.size(), 1u);
+  EXPECT_EQ(output.backends.front().dram.buffer_sizes, (std::vector<uint64_t>(4, 256ULL << 30)));
+}
+
 TEST(BackendPolicyConfig, BlankNumaEnvironmentMeansNoBinding) {
   for (const char* blank : {"", "  "}) {
     ASSERT_EQ(setenv("UMBP_DRAM_NUMA_NODE", blank, 1), 0);

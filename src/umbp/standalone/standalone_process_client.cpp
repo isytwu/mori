@@ -157,6 +157,7 @@ void ExportServerEnv(const UMBPConfig& config, const std::string& address) {
   SetEnv("UMBP_DRAM_NUMA_NODE", FormatNumaNodes(config.dram.numa_nodes));
   SetEnv("UMBP_DRAM_NUMA_STRICT", config.dram.numa_strict);
   SetEnv("UMBP_DRAM_PREFAULT_THREADS", config.dram.prefault_threads);
+  SetEnv("UMBP_DRAM_MAX_REGION_BYTES", config.dram.max_region_bytes);
   SetEnv("UMBP_DRAM_PREFAULT", config.dram.prefault);
   SetEnv("UMBP_DRAM_HIGH_WM", config.dram.high_watermark);
   SetEnv("UMBP_DRAM_LOW_WM", config.dram.low_watermark);

@@ -67,7 +67,9 @@ struct UMBPDramConfig {
   std::vector<int> numa_nodes;                // Empty = no NUMA binding.
   bool prefault = true;
   bool numa_strict = false;
-  int prefault_threads = 0;  // 0 = automatic (up to 16 for multi-node tiers), 1 = serial.
+  int prefault_threads = 0;  // 0 = automatic (up to 16), 1 = serial.
+  // Largest single host buffer of an unbound tier (0 = one buffer); see SplitTierCapacity.
+  uint64_t max_region_bytes = 256ULL << 30;
 };
 
 struct UMBPIoConfig {
@@ -661,6 +663,11 @@ struct UMBPConfig {
     cfg.dram.prefault_threads = getenv_int("UMBP_DRAM_PREFAULT_THREADS", 0);
     if (cfg.dram.prefault_threads < 0 || cfg.dram.prefault_threads > 16) {
       throw std::invalid_argument("UMBP_DRAM_PREFAULT_THREADS must be between 0 and 16");
+    }
+    cfg.dram.max_region_bytes =
+        getenv_size("UMBP_DRAM_MAX_REGION_BYTES", cfg.dram.max_region_bytes);
+    if (cfg.dram.max_region_bytes != 0 && cfg.dram.max_region_bytes < (1ULL << 30)) {
+      throw std::invalid_argument("UMBP_DRAM_MAX_REGION_BYTES must be 0 or at least 1 GiB");
     }
     cfg.dram.prefault = getenv_int("UMBP_DRAM_PREFAULT", cfg.dram.prefault ? 1 : 0) != 0;
 

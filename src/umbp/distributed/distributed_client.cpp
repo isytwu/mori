@@ -54,8 +54,11 @@ DistributedClient::DistributedClient(const UMBPConfig& config) : config_(config)
   // sizing/policy knobs cross this boundary now.
   DramOwnershipConfig dram_ownership;
   dram_ownership.numa_nodes = NormalizeNumaNodes(config.dram.numa_nodes);
-  dram_ownership.buffer_sizes = SplitNumaCapacity(
-      config.dram.capacity_bytes, dram_ownership.numa_nodes.size(), dc.dram_page_size);
+  dram_ownership.max_region_bytes = config.dram.max_region_bytes;
+  dram_ownership.buffer_sizes =
+      SplitTierCapacity(config.dram.capacity_bytes, dram_ownership.numa_nodes.size(),
+                        dc.dram_page_size, dram_ownership.max_region_bytes);
+  const size_t dram_buffers = dram_ownership.buffer_sizes.size();
   dram_ownership.use_hugepages = config.dram.use_hugepages;
   dram_ownership.hugepage_size = config.dram.hugepage_size;
   dram_ownership.prefault = config.dram.prefault;
@@ -161,7 +164,8 @@ DistributedClient::DistributedClient(const UMBPConfig& config) : config_(config)
       medium_desc = "DRAM pool=" + mb(config_.dram.capacity_bytes) +
                     "MB hugepages=" + (config_.dram.use_hugepages ? "true" : "false") +
                     " hugepage_size=" + mb(config_.dram.hugepage_size) +
-                    "MB numa_nodes=" + FormatNumaNodes(config_.dram.numa_nodes);
+                    "MB numa_nodes=" + FormatNumaNodes(config_.dram.numa_nodes) +
+                    " buffers=" + std::to_string(dram_buffers);
       break;
     case UMBPMedium::HBM:
       medium_desc =

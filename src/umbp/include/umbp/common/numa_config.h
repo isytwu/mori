@@ -83,4 +83,15 @@ inline std::vector<uint64_t> SplitNumaCapacity(uint64_t bytes, size_t nodes, uin
   return sizes;
 }
 
+// A bound tier keeps exactly one buffer per node. An unbound tier is cut into
+// buffers of at most max_region_bytes (0 = one buffer): each buffer is a single
+// hipHostRegister call, and that call's cost grows faster than its size.
+inline std::vector<uint64_t> SplitTierCapacity(uint64_t bytes, size_t nodes, uint64_t page_size,
+                                               uint64_t max_region_bytes) {
+  if (nodes > 0 || max_region_bytes == 0 || bytes <= max_region_bytes) {
+    return SplitNumaCapacity(bytes, nodes, page_size);
+  }
+  return SplitNumaCapacity(bytes, (bytes + max_region_bytes - 1) / max_region_bytes, page_size);
+}
+
 }  // namespace mori::umbp
