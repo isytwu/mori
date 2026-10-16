@@ -54,6 +54,12 @@ target_include_directories(test_transport_ibverbs PUBLIC ${CMAKE_SOURCE_DIR})
 # reintroduce a link-time dependency on a host without RDMA installed.
 target_link_libraries(test_transport_ibverbs mori_application mori_ibv_shim)
 
+# Needs a GPU and two RDMA devices, so not an add_test.
+add_executable(test_kfd_pin_check application/test_kfd_pin_check.cpp)
+target_include_directories(test_kfd_pin_check PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(test_kfd_pin_check PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_kfd_pin_check mori_application gtest_main)
+
 if(BUILD_IO)
   add_executable(test_protocol io/test_protocol.cpp)
 

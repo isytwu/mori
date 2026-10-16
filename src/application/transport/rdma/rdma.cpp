@@ -44,6 +44,7 @@
 #include "mori/hip_compat.hpp"
 #include "mori/utils/env_utils.hpp"
 #include "mori/utils/mori_log.hpp"
+#include "src/application/transport/rdma/kfd_pin_check.hpp"
 
 // mori::core::WcStatus is a device-safe mirror of ibverbs' ibv_wc_status so device
 // TUs need not include <infiniband/verbs.h>. This host TU sees both — guard the
@@ -421,6 +422,7 @@ RdmaDeviceContext::RdmaDeviceContext(RdmaDevice* device, ibv_pd* inPd) : device(
 
 RdmaDeviceContext::~RdmaDeviceContext() {
   for (auto& it : mrPool) {
+    KfdPinCheck::Instance().OnDeregistering(it.second);
     ibv_dereg_mr(it.second);
   }
   mrPool.clear();
@@ -445,6 +447,7 @@ application::RdmaMemoryRegion RdmaDeviceContext::RegisterRdmaMemoryRegion(void* 
   }
   MORI_APP_TRACE("RegisterRdmaMemoryRegion, addr:{}, size:{}, lkey:{}, rkey:{}\n", ptr, size,
                  mr->lkey, mr->rkey);
+  KfdPinCheck::Instance().OnRegistered(pd, ptr, size, mr, KfdPinCheck::Path::PeerMemory);
   mrPool.insert({ptr, mr});
   application::RdmaMemoryRegion handle;
   handle.addr = reinterpret_cast<uintptr_t>(ptr);
@@ -471,6 +474,7 @@ application::RdmaMemoryRegion RdmaDeviceContext::RegisterRdmaMemoryRegionDmabuf(
   MORI_APP_TRACE(
       "RegisterRdmaMemoryRegionDmabuf, addr:{}, size:{}, dmabuf_fd:{}, lkey:{}, rkey:{}\n", ptr,
       size, dmabuf_fd, mr->lkey, mr->rkey);
+  KfdPinCheck::Instance().OnRegistered(pd, ptr, size, mr, KfdPinCheck::Path::Dmabuf);
   mrPool.insert({ptr, mr});
   application::RdmaMemoryRegion handle;
   handle.addr = reinterpret_cast<uintptr_t>(ptr);
@@ -495,6 +499,7 @@ application::RdmaMemoryRegion RdmaDeviceContext::RegisterRdmaMemoryRegionDmabufI
       "RegisterRdmaMemoryRegionDmabufIova0, addr:{}, size:{}, dmabuf_fd:{}, iova:0, lkey:{}, "
       "rkey:{}",
       ptr, size, dmabuf_fd, mr->lkey, mr->rkey);
+  KfdPinCheck::Instance().OnRegistered(pd, ptr, size, mr, KfdPinCheck::Path::Dmabuf);
   mrPool.insert({ptr, mr});
   application::RdmaMemoryRegion handle;
   handle.addr = 0;
@@ -613,6 +618,10 @@ application::RdmaMemoryRegion RdmaDeviceContext::RegisterRdmaMemoryRegionAuto(vo
     if (mr) {
       MORI_APP_TRACE("RegisterRdmaMemoryRegionAuto[{}], addr:{}, size:{}, lkey:{}, rkey:{}", name,
                      ptr, size, mr->lkey, mr->rkey);
+      KfdPinCheck::Instance().OnRegistered(pd, ptr, size, mr,
+                                           !useDmabuf        ? KfdPinCheck::Path::PeerMemory
+                                           : preferDmabufReg ? KfdPinCheck::Path::DmabufPreferred
+                                                             : KfdPinCheck::Path::DmabufFallback);
       return makeHandle(mr);
     }
     MORI_APP_WARN(
@@ -631,6 +640,7 @@ application::RdmaMemoryRegion RdmaDeviceContext::RegisterRdmaMemoryRegionAuto(vo
 void RdmaDeviceContext::DeregisterRdmaMemoryRegion(void* ptr) {
   if (mrPool.find(ptr) == mrPool.end()) return;
   ibv_mr* mr = mrPool[ptr];
+  KfdPinCheck::Instance().OnDeregistering(mr);
   ibv_dereg_mr(mr);
   mrPool.erase(ptr);
 }

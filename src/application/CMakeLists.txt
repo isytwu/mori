@@ -59,6 +59,7 @@ list(
   APPEND
   MORI_APP_SOURCES
   transport/rdma/rdma.cpp
+  transport/rdma/kfd_pin_check.cpp
   transport/rdma/providers/dv_loader.cpp
   transport/rdma/providers/mlx5/mlx5.cpp
   transport/rdma/providers/mlx5/mlx5_abi_parity.cpp
