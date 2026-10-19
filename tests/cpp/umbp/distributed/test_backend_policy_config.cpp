@@ -354,6 +354,41 @@ TEST(BackendPolicyConfig, LowersSsdMinObjectSizeOntoTierMembers) {
   }
 }
 
+// A policy SSD backend runs with the node's SSD settings; the policy only says
+// where and how much.
+TEST(BackendPolicyConfig, SsdBackendsKeepTheNodesSsdSettings) {
+  auto loaded = LoadBackendPolicyJson(R"json(
+    {"backends":{"d":{"type":"dram","capacity":"1GiB"},
+                 "s":{"type":"ssd","capacity":"2GiB","path":"/tmp/a"}},
+     "tiers":[{"backends":{"d":1},"offload_to":["s"],"offload_trigger":"on_evict"},
+              {"backends":{"s":1}}]}
+  )json");
+  ASSERT_TRUE(loaded.ok()) << loaded.error;
+  PoolClientConfig output;
+  output.dram_page_size = 64ULL << 10;
+  output.ssd.ssd.verify_crc = false;
+  output.ssd.ssd.durability.mode = UMBPDurabilityMode::Relaxed;
+  output.ssd.ssd.tier_io_threads = 7;
+  output.ssd.ssd.segment_size_bytes = 256ULL << 20;
+  output.ssd.ssd.storage_dir = "/elsewhere";
+  output.ssd.ssd.capacity_bytes = 1;
+  std::string error;
+  ASSERT_TRUE(ApplyBackendPolicy(*loaded.config, &output, &error)) << error;
+  const BackendInstanceConfig* ssd = nullptr;
+  for (const auto& backend : output.backends) {
+    if (backend.name == "s") ssd = &backend;
+  }
+  ASSERT_NE(ssd, nullptr);
+  EXPECT_TRUE(ssd->ssd.enabled);
+  EXPECT_FALSE(ssd->ssd.ssd.verify_crc);
+  EXPECT_EQ(ssd->ssd.ssd.durability.mode, UMBPDurabilityMode::Relaxed);
+  EXPECT_EQ(ssd->ssd.ssd.tier_io_threads, 7);
+  EXPECT_EQ(ssd->ssd.ssd.segment_size_bytes, 256ULL << 20);
+  EXPECT_EQ(ssd->ssd.ssd.storage_dir, "/tmp/a");
+  EXPECT_EQ(ssd->ssd.ssd.capacity_bytes, 2ULL << 30);
+  EXPECT_EQ(ssd->ssd.ssd.ssd_backend, "file");
+}
+
 TEST(BackendPolicyConfig, ApplyIsAtomicWhenLoweringFails) {
   auto loaded = LoadBackendPolicyJson(R"json(
     {"backends":{"d":{"type":"dram","capacity":"1MiB"}},

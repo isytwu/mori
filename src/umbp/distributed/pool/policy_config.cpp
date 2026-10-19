@@ -627,6 +627,10 @@ bool ApplyBackendPolicy(const BackendPolicyConfig& policy, PoolClientConfig* con
           if (backend.capacity_bytes > std::numeric_limits<size_t>::max()) {
             Invalid("backend '" + backend.name + "': capacity does not fit size_t");
           }
+          // The node's SSD settings (durability, checksums, IO threads, segment
+          // size, ...), as a DRAM backend takes the node's hugepage and prefault
+          // settings; the policy names only where and how much.
+          instance.ssd = config->ssd;
           instance.ssd.enabled = true;
           instance.ssd.ssd.enabled = true;
           instance.ssd.ssd.capacity_bytes = static_cast<size_t>(backend.capacity_bytes);
