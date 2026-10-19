@@ -317,8 +317,12 @@ class PeerPool {
   // no rescan, which is what keeps repeated commits off the placement map.
   std::vector<size_t> queued_by_tier_;
   bool stop_transition_worker_ = false;
-  std::thread transition_worker_;
-  std::chrono::milliseconds evict_demotion_retry_budget_{30000};  // transition worker only
+  // UMBP_TRANSITION_WORKERS of them (default 1).  Each runs one job at a time
+  // with the pool lock released for the copy, so several keep several device
+  // writes in flight: one worker is a whole demotion (read, write, commit) per
+  // key, which caps how fast an evicting tier can shed into the next one.
+  std::vector<std::thread> transition_workers_;
+  std::chrono::milliseconds evict_demotion_retry_budget_{30000};  // transition workers only
 
   // Local watermark eviction.  local_evict_mutex_ guards local_evict_,
   // stop_local_evict_ and the worker's start.

@@ -52,6 +52,11 @@ std::chrono::milliseconds EvictDemotionRetryBudget() {
 // Pause before a lone retry, so waiting out pressure does not spin the worker.
 constexpr std::chrono::milliseconds kEvictRetryIdlePause{20};
 
+// Read per pool, not cached, so a test can construct pools with different counts.
+uint32_t TransitionWorkerCount() {
+  return std::min<uint32_t>(GetEnvUint32("UMBP_TRANSITION_WORKERS", 1, /*min_allowed=*/1), 64);
+}
+
 // One watermark scan queues at most this many keys; the worker tops the queue
 // up after each completed offload, so a tier still drains all the way down to
 // its low watermark without ever queueing its whole key set at once.
@@ -106,7 +111,11 @@ PeerPool::PeerPool(BackendRegistry* backends, std::unique_ptr<PoolPolicy> policy
       }
     }
     evict_demotion_retry_budget_ = EvictDemotionRetryBudget();
-    transition_worker_ = std::thread(&PeerPool::TransitionWorkerLoop, this);
+    const uint32_t workers = TransitionWorkerCount();
+    for (uint32_t i = 0; i < workers; ++i) {
+      transition_workers_.emplace_back(&PeerPool::TransitionWorkerLoop, this);
+    }
+    if (workers > 1) MORI_UMBP_INFO("[PeerPool] {} tier transition workers", workers);
   }
 }
 
@@ -147,7 +156,10 @@ void PeerPool::StopTransitionWorker() {
     std::fill(queued_by_tier_.begin(), queued_by_tier_.end(), 0);
   }
   transition_cv_.notify_all();
-  if (transition_worker_.joinable()) transition_worker_.join();
+  for (auto& worker : transition_workers_) {
+    if (worker.joinable()) worker.join();
+  }
+  transition_workers_.clear();
 }
 
 void PeerPool::TouchLocked(const std::string& key) {

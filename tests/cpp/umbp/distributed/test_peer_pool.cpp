@@ -741,6 +741,50 @@ TEST(PeerPool, OnEvictMigratesBytesToConfiguredBackend) {
             payload);
 }
 
+TEST(PeerPool, SeveralTransitionWorkersKeepSeveralDemotionsInFlight) {
+  constexpr uint64_t kPageSize = 64;
+  constexpr int kKeys = 4;
+  GatedEngine engine;
+  BackendRegistry registry;
+  RegisterPageBackend(&registry, &engine, "hot", TierType::DRAM, kPageSize, kKeys);
+  RegisterPageBackend(&registry, &engine, "cold", TierType::SSD, kPageSize, kKeys);
+  auto compiled = LogicalTierGraph::Compile(HotColdTiers(PoolOffloadTrigger::kOnEvict), registry);
+  ASSERT_TRUE(compiled.ok()) << compiled.error;
+  setenv("UMBP_TRANSITION_WORKERS", "4", 1);
+  PeerPool pool(&registry, MakeTieredPlacementPolicy(compiled.graph), &engine);
+  unsetenv("UMBP_TRANSITION_WORKERS");
+
+  std::vector<std::string> keys;
+  for (int i = 0; i < kKeys; ++i) {
+    keys.push_back("k" + std::to_string(i));
+    auto allocation = CommitKey(&pool, keys.back());
+    auto ref = registry.Get("hot")->BufferRef(allocation.allocation.pages[0].buffer_index);
+    std::memset(
+        static_cast<char*>(ref.host_ptr) + allocation.allocation.pages[0].page_index * kPageSize,
+        'a' + i, kPageSize);
+  }
+  for (const auto& result : pool.Evict(keys, PoolEvictMode::kReclaim)) {
+    EXPECT_EQ(result.outcome, PoolEvictOutcome::kDemotionQueued) << result.key;
+  }
+  // One worker holds one copy at a time; four hold all of them at once.
+  ASSERT_TRUE(engine.WaitForHeld(kKeys)) << "demotions ran one at a time";
+
+  engine.Release();
+  for (int i = 0; i < kKeys; ++i) {
+    ASSERT_TRUE(WaitForKeyGone(&registry, "hot", keys[i])) << keys[i];
+    EXPECT_TRUE(registry.Get("cold")->Contains(keys[i])) << keys[i];
+    auto resolved = pool.BatchResolve({keys[i]}, false).front();
+    ASSERT_TRUE(resolved.resolved.found) << keys[i];
+    auto ref = registry.Get("cold")->BufferRef(resolved.resolved.pages[0].buffer_index);
+    EXPECT_EQ(std::string(static_cast<char*>(ref.host_ptr) +
+                              resolved.resolved.pages[0].page_index * kPageSize,
+                          kPageSize),
+              std::string(kPageSize, 'a' + i))
+        << keys[i];
+  }
+  EXPECT_EQ(pool.TransitionMetrics().succeeded, static_cast<uint64_t>(kKeys));
+}
+
 TEST(PeerPool, EvictionRetryDrainsLeasedSourceWithoutDeletingTarget) {
   constexpr uint64_t kPageSize = 64;
   // Outlives the queued demotion, so its source delete is refused.
