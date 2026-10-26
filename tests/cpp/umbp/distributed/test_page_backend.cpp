@@ -1159,6 +1159,20 @@ TEST(PageBackendEvictionClass, LowClassGoesFirstUnderALargeWeight) {
   EXPECT_EQ(OfferedOrder(*backend), (std::vector<std::string>{"k2", "k3", "k0", "k1"}));
 }
 
+TEST(PageBackendEvictionClass, ClassTwoAgesAsClassOneAndIsReported) {
+  auto backend = MakeOrderedBackend();
+  backend->SetLowClassAgeWeightForTest(1e9);
+  PutKeys(*backend, 4, std::chrono::milliseconds{1});
+  EXPECT_EQ(backend->SetEvictionClass({"k2"}, 1), 1u);
+  // Out-of-range classes clamp to the nearest one.
+  EXPECT_EQ(backend->SetEvictionClass({"k3"}, 7), 1u);
+  EXPECT_EQ(OfferedOrder(*backend), (std::vector<std::string>{"k2", "k3", "k0", "k1"}));
+  EXPECT_EQ(backend->EvictionClassOf("k0"), 0);
+  EXPECT_EQ(backend->EvictionClassOf("k2"), 1);
+  EXPECT_EQ(backend->EvictionClassOf("k3"), 2);
+  EXPECT_EQ(backend->EvictionClassOf("missing"), 0);
+}
+
 TEST(PageBackendEvictionClass, DefaultWeightKeepsOnePlainLruOrder) {
   auto backend = MakeOrderedBackend();
   PutKeys(*backend, 6, std::chrono::milliseconds{2});

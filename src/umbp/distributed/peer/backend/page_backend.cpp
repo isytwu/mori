@@ -867,7 +867,7 @@ std::vector<EvictionOffer> PageBackend::EvictionCandidates(size_t max_count) {
 
 size_t PageBackend::SetEvictionClass(const std::vector<std::string>& keys, int eviction_class) {
   if (keys.empty()) return 0;
-  const uint8_t target = eviction_class > 0 ? 1 : 0;
+  const uint8_t target = static_cast<uint8_t>(std::clamp(eviction_class, 0, 2));
   std::shared_lock<std::shared_mutex> lock(mutex_);
   if (!track_eviction_order_) return 0;
   std::vector<std::pair<const std::string*, OwnedSlot*>> held;
@@ -886,6 +886,12 @@ size_t PageBackend::SetEvictionClass(const std::vector<std::string>& keys, int e
     InsertByAgeLocked(*key, *slot);
   }
   return held.size();
+}
+
+int PageBackend::EvictionClassOf(const std::string& key) const {
+  std::shared_lock<std::shared_mutex> lock(mutex_);
+  auto it = owned_.find(key);
+  return it == owned_.end() ? 0 : it->second.eviction_class;
 }
 
 void PageBackend::InsertByAgeLocked(const std::string& key, OwnedSlot& slot) {

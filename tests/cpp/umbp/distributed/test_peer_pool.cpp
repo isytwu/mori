@@ -833,6 +833,32 @@ TEST(PeerPool, DiscardDeletesInsteadOfDemoting) {
   EXPECT_EQ(pool.PlacementCount(), 0u);
 }
 
+TEST(PeerPool, AnEvictionClassTwoKeyIsDroppedInsteadOfDemoted) {
+  constexpr uint64_t kPageSize = 64;
+  LocalCopyEngine engine;
+  BackendRegistry registry;
+  RegisterPageBackend(&registry, &engine, "hot", TierType::DRAM, kPageSize, 2);
+  RegisterPageBackend(&registry, &engine, "cold", TierType::SSD, kPageSize, 2);
+  auto compiled = LogicalTierGraph::Compile(HotColdTiers(PoolOffloadTrigger::kOnEvict), registry);
+  ASSERT_TRUE(compiled.ok()) << compiled.error;
+  PeerPool pool(&registry, MakeTieredPlacementPolicy(compiled.graph), &engine);
+  registry.Get("hot")->TrackEvictionOrder();
+
+  CommitKey(&pool, "stale");
+  CommitKey(&pool, "live");
+  EXPECT_EQ(pool.BatchSetEvictionClass({"stale"}, 2), 1u);
+
+  auto evicted = pool.Evict(std::vector<std::string>{"stale", "live"}, PoolEvictMode::kReclaim);
+  ASSERT_EQ(evicted.size(), 2u);
+  EXPECT_EQ(evicted[0].outcome, PoolEvictOutcome::kFreed);
+  EXPECT_EQ(evicted[0].bytes_freed, 64u);
+  EXPECT_EQ(evicted[1].outcome, PoolEvictOutcome::kDemotionQueued);
+  ASSERT_TRUE(WaitForKeyGone(&registry, "hot", "live"));
+  EXPECT_TRUE(registry.Get("cold")->Contains("live"));
+  EXPECT_FALSE(registry.Get("hot")->Contains("stale"));
+  EXPECT_FALSE(registry.Get("cold")->Contains("stale"));
+}
+
 // Copy-promotes `key`: both media hold it, the placement is the hot copy, and
 // the read's lease on the hot copy has lapsed.
 void PromoteByCopy(PeerPool* pool, BackendRegistry* registry, const std::string& key) {

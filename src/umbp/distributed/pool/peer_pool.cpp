@@ -1115,6 +1115,11 @@ std::vector<PoolEvictResult> PeerPool::Evict(const std::vector<PoolEvictRequest>
       demote = placement != placements_.end() && placement->second == source_id &&
                tier_index.has_value() && !tier_graph_->NodeAt(*tier_index).offload_to.empty();
     }
+    // Eviction class 2: the caller said no lower tier is worth its copy.
+    if (demote) {
+      const auto* source = backends_->Get(source_id);
+      if (source != nullptr && source->EvictionClassOf(request.key) >= 2) demote = false;
+    }
     if (demote) {
       demotions.emplace_back(i, source_id);
     } else {

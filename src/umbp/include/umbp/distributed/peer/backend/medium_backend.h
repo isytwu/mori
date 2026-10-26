@@ -321,13 +321,16 @@ class MediumBackend : public MetricSource {
   // a medium that keeps no order holds them for nothing and returns 0.
   virtual size_t Touch(const std::vector<std::string>& /*keys*/) { return 0; }
 
-  // Eviction class for held keys: 0 normal, 1 evicted sooner (see
-  // PageBackend::SetEvictionClass).  Returns how many are held here; a medium
-  // that keeps no order ignores it and returns 0.
+  // Eviction class for held keys: 0 normal, 1 evicted sooner, 2 as 1 and
+  // dropped rather than demoted when evicted (see PageBackend::SetEvictionClass).
+  // Returns how many are held here; a medium that keeps no order ignores it and
+  // returns 0.
   virtual size_t SetEvictionClass(const std::vector<std::string>& /*keys*/,
                                   int /*eviction_class*/) {
     return 0;
   }
+  // The eviction class of a held key; 0 for a key not held or a medium without one.
+  virtual int EvictionClassOf(const std::string& /*key*/) const { return 0; }
 
   // ---- observability ----
   //

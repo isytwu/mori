@@ -315,12 +315,14 @@ class PageBackend : public MediumBackend {
   // the read's lease.  0 until TrackEvictionOrder().
   size_t Touch(const std::vector<std::string>& keys) override;
 
-  // Puts held keys in eviction class 0 (normal) or 1 (low priority) without
-  // changing their recency.  When EvictionCandidates picks between the oldest
-  // key of each class, a low-priority key's age counts low_class_age_weight
-  // times (UMBP_LOW_CLASS_AGE_WEIGHT, default 1: one plain LRU order).  Returns
-  // how many are held; 0 until TrackEvictionOrder().
+  // Puts held keys in eviction class 0 (normal), 1 (low priority) or 2 (low
+  // priority, and not worth a lower tier: PeerPool drops it on eviction instead
+  // of demoting it) without changing their recency.  When EvictionCandidates
+  // picks between the oldest key of each class, a low-priority key's age counts
+  // low_class_age_weight times (UMBP_LOW_CLASS_AGE_WEIGHT, default 1: one plain
+  // LRU order).  Returns how many are held; 0 until TrackEvictionOrder().
   size_t SetEvictionClass(const std::vector<std::string>& keys, int eviction_class) override;
+  int EvictionClassOf(const std::string& key) const override;
   void SetLowClassAgeWeightForTest(double weight);
 
   // ==================== Reaper ====================
