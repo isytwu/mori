@@ -47,6 +47,7 @@
 #include "umbp/distributed/peer/backend/medium_backend.h"
 #include "umbp/distributed/transfer/transfer_engine.h"
 #include "umbp/distributed/types.h"
+#include "umbp/local/host_mem_allocator.h"
 #include "umbp_peer.grpc.pb.h"
 
 namespace mori::umbp {
@@ -775,6 +776,27 @@ class PoolClient {
 
   ScratchArena ranged_get_scratch_;
   ScratchArena ranged_put_scratch_;
+
+  // UMBP_DISTRIBUTED_RANGED_SCRATCH_PER_NUMA=1: a GET and a PUT arena bound to each NUMA
+  // node that has a GPU, besides the shared pair above.  A ranged call takes the pair on
+  // its caller buffer's node: the RDMA leg then uses that node's NICs (picked from the
+  // arena's node when it is registered) and the copy into the GPU stays on its socket.
+  struct NumaScratch {
+    int numa_node = -1;
+    HostBufferHandle get_handle;
+    HostBufferHandle put_handle;
+    std::unique_ptr<ScratchArena> get;
+    std::unique_ptr<ScratchArena> put;
+  };
+  std::vector<NumaScratch> numa_scratch_;
+  struct ArenaRef {
+    ScratchArena* arena = nullptr;
+    char* base = nullptr;
+    size_t size = 0;
+  };
+  // The arena a ranged GET (`get`) or PUT whose caller buffer is `ptr` uses.
+  ArenaRef RangedArenaFor(const void* ptr, bool get);
+  void InitNumaScratch(size_t shards);
   std::condition_variable recache_cv_;
   std::thread recache_worker_;
   bool recache_stop_ = false;
