@@ -744,6 +744,22 @@ TEST_F(SsdBackendTest, CandidatesAreColdestFirstAndSkipALeasedKey) {
   EXPECT_EQ(offers.size(), 2u);
 }
 
+// What PeerPool::BatchTouch hands every medium for a GPU-cache hit.
+TEST_F(SsdBackendTest, TouchWarmsAHeldKeyWithoutReadingIt) {
+  SsdBackend* backend = Start();
+  ASSERT_TRUE(Put(backend, "a", Payload(1024, 1)));
+  ASSERT_TRUE(Put(backend, "b", Payload(1024, 2)));
+  ASSERT_TRUE(Put(backend, "c", Payload(1024, 3)));
+
+  EXPECT_EQ(backend->Touch({"a", "missing"}), 1u);
+  const auto offers = backend->EvictionCandidates(10);
+  ASSERT_EQ(offers.size(), 3u);
+  EXPECT_EQ(offers[0].key, "b");
+  EXPECT_EQ(offers[1].key, "c");
+  EXPECT_EQ(offers[2].key, "a");
+  EXPECT_EQ(backend->Touch({}), 0u);
+}
+
 TEST_F(SsdBackendTest, PoolLocalEvictionDrainsTheSsdMediumThroughEvict) {
   // SSD's watermark eviction now runs in the pool and reaches it via Evict().
   constexpr uint64_t kCapacity = 1024 * 1024;

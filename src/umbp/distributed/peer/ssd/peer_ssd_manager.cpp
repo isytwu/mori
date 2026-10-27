@@ -142,6 +142,20 @@ void PeerSsdManager::TouchLocked(const std::string& key) {
   it->second.lru_it = lru_.begin();
 }
 
+size_t PeerSsdManager::Touch(const std::vector<std::string>& keys) {
+  std::vector<std::string> held;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& key : keys) {
+      if (owned_.find(key) == owned_.end()) continue;
+      TouchLocked(key);
+      held.push_back(key);
+    }
+  }
+  if (!held.empty() && backend_) backend_->Touch(held);  // tier call outside the lock
+  return held.size();
+}
+
 std::vector<bool> PeerSsdManager::WriteBatch(const std::vector<std::string>& keys,
                                              const std::vector<const void*>& srcs,
                                              const std::vector<size_t>& sizes) {

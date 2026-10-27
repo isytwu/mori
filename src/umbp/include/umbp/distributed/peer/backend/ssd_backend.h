@@ -129,6 +129,9 @@ class SsdBackend : public MediumBackend {
   // a staged or migration read holds.
   std::vector<EvictionOffer> EvictionCandidates(size_t max_count) override;
   bool OwnsEvictionOrder() const override;
+  // A GPU-cache hit on a key whose pool copy is here keeps that copy (and, on
+  // the segment-log tier, its whole segment) as warm as a read would.
+  size_t Touch(const std::vector<std::string>& keys) override;
 
   void SetAutoFlushHook(size_t threshold, std::function<void()> cb) override;
 

@@ -240,6 +240,40 @@ TEST_F(SegmentReclaimTest, InPlaceReadCountsAsAnAccess) {
   EXPECT_EQ(tier->EvictionOrder(1).front().key, Key(16));
 }
 
+// The pool's BatchTouch (a GPU-cache hit on the key) warms the record and its
+// segment without reading it; a key the tier does not hold is not recorded.
+TEST_F(SegmentReclaimTest, TouchCountsAsAnAccess) {
+  auto tier = MakeTier();
+  for (int i = 0; i < 48; ++i) ASSERT_TRUE(Write(*tier, i));  // segments 0..2, 2 active
+  EXPECT_EQ(tier->Touch({Key(3), "missing"}), 1u);
+  const auto order = tier->EvictionOrder(48);
+  ASSERT_EQ(order.size(), 48u);
+  EXPECT_EQ(order.front().key, Key(16)) << "segment 1 is now the coldest";
+  EXPECT_EQ(order[31].key, Key(3)) << "the touched key last in its segment";
+  EXPECT_EQ(tier->GetLRUCandidates(100).size(), 48u);
+}
+
+TEST_F(SegmentReclaimTest, ShardedTouchReachesTheDriveThatHoldsTheKey) {
+  std::vector<std::unique_ptr<TierBackend>> shards;
+  for (const char* name : {"d0", "d1"}) {
+    const fs::path d = dir_ / name;
+    fs::create_directories(d);
+    auto cfg = Config(8 * kMiB, 1 * kMiB);
+    cfg.storage_dir = d.string();
+    shards.push_back(std::make_unique<SSDTier>(d.string(), 8 * kMiB, cfg));
+  }
+  ShardedSsdTier tier(std::move(shards));
+  for (int i = 0; i < 96; ++i) {
+    const auto v = ValueFor(i);
+    ASSERT_TRUE(tier.Write(Key(i), v.data(), v.size())) << i;
+  }
+  const std::string coldest = tier.EvictionOrder(1).front().key;
+  EXPECT_EQ(tier.Touch({coldest, "missing"}), 1u);
+  const std::string next = tier.EvictionOrder(1).front().key;
+  EXPECT_NE(next, coldest);
+  EXPECT_EQ(tier.ShardOf(next), tier.ShardOf(coldest)) << "the same drive, its next segment";
+}
+
 // A batch reports each key: one that does not fit fails alone, and is not
 // left looking stored.  Before, a key refused for space came back `true`.
 TEST_F(SegmentReclaimTest, BatchWriteReportsKeysThatDidNotFit) {

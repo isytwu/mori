@@ -130,6 +130,10 @@ class PeerSsdManager {
   // order is this class's LRU and an offer carries the key's size.
   std::vector<EvictionOffer> EvictionCandidates(size_t max_count);
 
+  // Held keys count as just read, in this class's LRU and in the tier's order,
+  // without device IO.  Returns how many are held.
+  size_t Touch(const std::vector<std::string>& keys);
+
   // True when only the tier's own order frees space (the segment-log SSD tier
   // returns disk a whole segment at a time), so no other ranking should be
   // used to pick its victims.

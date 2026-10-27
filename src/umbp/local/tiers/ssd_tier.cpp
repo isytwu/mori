@@ -1304,6 +1304,18 @@ std::vector<std::string> SSDTier::GetLRUCandidates(size_t max_candidates) const 
   return index_.GetLRUCandidates(max_candidates);
 }
 
+size_t SSDTier::Touch(const std::vector<std::string>& keys) {
+  std::lock_guard<std::mutex> lock(mu_);
+  size_t held = 0;
+  for (const auto& key : keys) {
+    // TouchLRU would also put an unknown key on the LRU list.
+    if (index_.FindKey(key) == nullptr) continue;
+    index_.TouchLRU(key);
+    ++held;
+  }
+  return held;
+}
+
 // The fd handed out is not pinned: the zero-copy reader never says when it is
 // done.  A deleted segment's fd stays open for the retired-file grace instead
 // (SetRetiredFileHook), and the bytes under it are never rewritten meanwhile.
