@@ -879,6 +879,12 @@ size_t PageBackend::SetEvictionClass(const std::vector<std::string>& keys, int e
   std::lock_guard<std::mutex> lru_lock(lru_mutex_);
   for (auto& [key, slot] : held) {
     if (slot->eviction_class == target) continue;
+    // Classes 1 and 2 share one list: the key keeps its place.  Re-inserting by
+    // age would walk the list from its recent end, the whole list for an old key.
+    if ((slot->eviction_class != 0) == (target != 0)) {
+      slot->eviction_class = target;
+      continue;
+    }
     // Changing class is not a use: the key keeps its age, and its place by age
     // in the new list.
     RemoveFromLruLocked(*slot);
