@@ -355,6 +355,19 @@ std::atomic<bool>& GatherDisabled() {
   return disabled;
 }
 
+// UMBP_DRAM_COPY_MODE=sdma routes host<->HBM copies through hipMemcpyAsync on a
+// copy engine instead of the gather compute kernel, so the restore does not
+// take CUs from a concurrent decode. The kernel moves scattered 4 KiB
+// fragments faster, but on a busy GPU its CU time lands on the decode tail;
+// this trades that for slower but off-CU SDMA copies. Default keeps the kernel.
+bool CopyModeSdma() {
+  static const bool v = [] {
+    const char* e = std::getenv("UMBP_DRAM_COPY_MODE");
+    return e != nullptr && std::string(e) == "sdma";
+  }();
+  return v;
+}
+
 // Which device a plan's copies should run on.  A D2D pair between two devices
 // needs a current device with peer access to both; we pick the destination's,
 // which is the one hipMemcpy attributes the copy to.
@@ -443,7 +456,9 @@ void HbmCopyEngine::Prewarm(size_t gather_streams_per_device) {
   const bool gather = !GatherDisabled().load(std::memory_order_relaxed) && DeviceGatherEnabled();
   int previous_device = 0;
   (void)hipGetDevice(&previous_device);
-  if (gather) GatherStreamPool::Instance().SetCap(gather_streams_per_device);
+  // SDMA mode shares the same stream pool for its async copies, so it needs the
+  // cap set even though it launches no gather kernel.
+  if (gather || CopyModeSdma()) GatherStreamPool::Instance().SetCap(gather_streams_per_device);
   size_t warmed = 0;
   for (int device_id = 0; device_id < devices; ++device_id) {
     if (hipSetDevice(device_id) != hipSuccess) {
@@ -542,7 +557,8 @@ std::vector<char> HbmCopyEngine::GatherEligiblePlans(const std::vector<TransferP
   auto note = [skip_reasons](size_t plan_index, GatherSkip reason) {
     if (skip_reasons != nullptr) (*skip_reasons)[plan_index] = reason;
   };
-  if (GatherDisabled().load(std::memory_order_relaxed) || !DeviceGatherEnabled()) {
+  if (GatherDisabled().load(std::memory_order_relaxed) || !DeviceGatherEnabled() ||
+      CopyModeSdma()) {
     for (size_t p = 0; p < plans.size(); ++p) note(p, GatherSkip::kDisabled);
     return done;
   }
@@ -720,6 +736,24 @@ std::unique_ptr<TransferHandle> HbmCopyEngine::Submit(std::vector<TransferPlan> 
   // The pass may have left the current device anywhere.
   current_device = -1;
 
+  // UMBP_DRAM_COPY_MODE=sdma issues hipMemcpyAsync on a non-blocking stream per
+  // device (the gather pass left every plan ungathered), so the scattered 4 KiB
+  // copies run on a copy engine off the CUs a concurrent decode needs. The
+  // stream is synchronized when the device changes and at the end, which is what
+  // keeps this Submit launch-to-completion like the blocking path.
+  const bool sdma = CopyModeSdma();
+  hipStream_t copy_stream = nullptr;
+  auto drain_stream = [&]() {
+    if (copy_stream == nullptr) return;
+    if (hipStreamSynchronize(copy_stream) == hipSuccess) {
+      GatherStreamPool::Instance().Release(current_device, copy_stream);
+    } else {
+      (void)hipGetLastError();
+      GatherStreamPool::Instance().Discard(current_device);
+    }
+    copy_stream = nullptr;
+  };
+
   for (size_t plan_index = 0; plan_index < plans.size(); ++plan_index) {
     const auto& plan = plans[plan_index];
     if (gathered[plan_index] != 0) continue;
@@ -729,6 +763,7 @@ std::unique_ptr<TransferHandle> HbmCopyEngine::Submit(std::vector<TransferPlan> 
         if (hipGetDevice(&entry_device) != hipSuccess) entry_device = -1;
         device_touched = true;
       }
+      drain_stream();  // finish the old device's async copies before leaving it
       const hipError_t derr = hipSetDevice(want_device);
       if (derr != hipSuccess) {
         failures.push_back(TransferFailure{plan.tags, static_cast<uint32_t>(derr),
@@ -739,6 +774,7 @@ std::unique_ptr<TransferHandle> HbmCopyEngine::Submit(std::vector<TransferPlan> 
         continue;
       }
       current_device = want_device;
+      if (sdma) copy_stream = GatherStreamPool::Instance().Acquire(want_device);
     }
 
     const hipMemcpyKind kind = KindFor(plan.src, plan.dst);
@@ -748,13 +784,19 @@ std::unique_ptr<TransferHandle> HbmCopyEngine::Submit(std::vector<TransferPlan> 
     // One failure per PLAN, not per segment: the plan is the unit a tag set
     // maps back to, and a partially-copied key is failed wholesale anyway.
     //
-    // hipMemcpy is BLOCKING, so this loop is already launch-to-completion and
-    // the debug clock below needs no synchronize of its own.
+    // Blocking hipMemcpy is already launch-to-completion; the async path's
+    // completion is the per-device drain, so the debug clock there measures
+    // launch time, not copy time.
     size_t plan_bytes = 0;
     const auto started = std::chrono::steady_clock::now();
     hipError_t err = hipSuccess;
+    const bool use_async = sdma && copy_stream != nullptr;
     for (size_t i = 0; i < plan.sizes.size(); ++i) {
-      err = hipMemcpy(dst + plan.dst_offsets[i], src + plan.src_offsets[i], plan.sizes[i], kind);
+      err = use_async
+                ? hipMemcpyAsync(dst + plan.dst_offsets[i], src + plan.src_offsets[i],
+                                 plan.sizes[i], kind, copy_stream)
+                : hipMemcpy(dst + plan.dst_offsets[i], src + plan.src_offsets[i], plan.sizes[i],
+                            kind);
       if (err != hipSuccess) break;
       plan_bytes += plan.sizes[i];
     }
@@ -781,6 +823,8 @@ std::unique_ptr<TransferHandle> HbmCopyEngine::Submit(std::vector<TransferPlan> 
                                          std::string("hbm:dev") + std::to_string(want_device)});
     }
   }
+
+  drain_stream();  // the last device's async copies, before the device is restored
 
   if (device_touched && entry_device >= 0) {
     // Best effort: a failure here cannot be attributed to any one plan, and the
