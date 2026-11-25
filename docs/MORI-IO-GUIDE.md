@@ -202,7 +202,10 @@ sequences per DP rank (details: [k31_smci355_pd_mitigation_zh.md](https://github
 | Line-rate bursts, 1 GiB per NIC per transfer, 16 MB batches 2 in flight, same TC as EP | +12.5% | dispatch +38%, ~5,700 CNP/s at the decode |
 | The same KV in another traffic class (`MORI_IO_TC`, a lossy class here) | +0.1% | no retransmissions with one source; with 2:1 incast the sources retransmit and the KV tail grows |
 | The same KV in 2-4 MB batches, one in flight, same TC as EP | +0.2% - +0.6% | no loss; a little slower per transfer |
+| 2:1 incast (two sources write one NIC at once), lossy traffic class | +0.4% | ~100k retransmitted packets/s, KV p99 50 -> 69 ms |
+| 2:1 incast, lossy traffic class, 2 MB batches one in flight | +0.7% | no retransmissions, KV p99 57 ms |
 | vLLM MoRIIO READ (the decode pulls), defaults, ~19 GB/s of KV per decode node | no change | single-QP reads peak at ~200-230 Gb/s per NIC, below line rate; the other traffic class or bounded in-flight gave nothing |
+| The same READ with `MORI_IO_QP_PER_TRANSFER=4` | +1.4% vs the lossy class | bursts reach line rate (p99 354 Gb/s), ~3,600 CNP/s, dispatch +8% |
 
 Recommendations:
 
@@ -224,7 +227,9 @@ Recommendations:
   flow control, the transfer keeps line-rate throughput across QPs.
 - **Or put the KV in its own traffic class** (`MORI_IO_TC` / `MORI_IO_SL`, matching the switch's class map). EP then no
   longer queues behind it. On a lossy class expect retransmissions and a longer KV tail when several sources write
-  one NIC at once.
+  one NIC at once; bounding the in-flight bytes as above removes them (no retransmissions with 2 MB batches).
+- vLLM's MoRIIO connector ignores the `VLLM_MORIIO_QP_PER_TRANSFER` environment variable in recent builds (it logs a
+  warning); set `qp_per_transfer` in `kv_connector_extra_config`, or `MORI_IO_QP_PER_TRANSFER` for MORI-IO itself.
 - **Do not just rate-limit.** Pacing that still posts large batches keeps the line-rate trains and spreads them over
   more time, so they meet EP more often (measured: +15% at 10 GB/s per NIC with 16 MB batches).
 
