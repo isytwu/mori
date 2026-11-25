@@ -10,6 +10,7 @@ MORI-IO is AMD's point-to-point communication library that leverages GDR (GPU Di
 - [Python API Quick Reference](#python-api-quick-reference)
 - [Example: Basic Read/Write](#example-basic-readwrite)
 - [Environment & Configuration](#environment--configuration)
+- [Sharing NICs with MoRI EP](#sharing-nics-with-mori-ep)
 - [Profiling MORI-IO with ROCTX Markers](#profiling-mori-io-with-roctx-markers)
 - [Source Files](#source-files)
 
@@ -184,6 +185,48 @@ See `examples/io/example.py` for more complete examples including batch transfer
 UMBP (the upper-layer cache pool) exposes a separate set of runtime-tunable
 env vars for distributed master / pool client / SPDK proxy timing. Those are
 out of scope for MORI-IO; see [`src/umbp/doc/runtime-env-vars.md`](https://github.com/ROCm/mori/blob/main/src/umbp/doc/runtime-env-vars.md).
+
+## Sharing NICs with MoRI EP
+
+In prefill/decode disaggregation the decode nodes receive KV over the same NICs, rails and (by default) the same
+traffic class as MoRI EP's dispatch / combine. A KV transfer that runs at line rate fills the switch egress queue in
+front of a decode NIC, and EP packets wait behind it. Two things decide whether that happens: whether the KV reaches
+line rate on a NIC, and how many bytes one QP keeps in flight (a single long train at line rate is what EP waits
+behind, not the average rate).
+
+Measured on MI355X nodes with 8 ionic 400G NICs each (RoCE, rail-only), Kimi K3.1 in vLLM, EP16 decode with 64
+sequences per DP rank (details: [k31_smci355_pd_mitigation_zh.md](https://github.com/isytwu/vllm/blob/k31-epio-smci355/docs/epio/k31_smci355_pd_mitigation_zh.md)):
+
+| KV into the decode | Decode step | Notes |
+|---|---|---|
+| Line-rate bursts, 1 GiB per NIC per transfer, 16 MB batches 2 in flight, same TC as EP | +12.5% | dispatch +38%, ~5,700 CNP/s at the decode |
+| The same KV in another traffic class (`MORI_IO_TC`, a lossy class here) | +0.1% | no retransmissions with one source; with 2:1 incast the sources retransmit and the KV tail grows |
+| The same KV in 2-4 MB batches, one in flight, same TC as EP | +0.2% - +0.6% | no loss; a little slower per transfer |
+| vLLM MoRIIO READ (the decode pulls), defaults, ~19 GB/s of KV per decode node | no change | single-QP reads peak at ~200-230 Gb/s per NIC, below line rate; the other traffic class or bounded in-flight gave nothing |
+
+Recommendations:
+
+- **Pull-style KV with one QP per transfer (vLLM's MoRIIO READ, the defaults): leave it.** It stays below line rate
+  per NIC and did not slow MoRI EP in the runs above. If you raise `qp_per_transfer` or enable chunking to get more KV
+  bandwidth, check the EP kernel times again: that is what brings the KV to line rate.
+- **KV that reaches line rate (more QPs, chunked bulk transfers, push-style KV stores): bound the bytes each QP keeps
+  in flight**, so EP never waits behind more than a few MB:
+
+  ```bash
+  export MORI_IO_ENABLE_CHUNKING=1
+  export MORI_IO_CHUNK_BYTES=1048576   # 1-4 MiB per WR
+  export MORI_IO_MAX_CHUNKS=4096       # >= the largest transfer / chunk size (the default 64 enlarges the chunks)
+  export MORI_IO_QP_MAX_SEND_WR=4      # SQ depth: bytes in flight per QP ~ depth x chunk
+  export MORI_IO_POST_BATCH_SIZE=4     # <= the SQ depth; a larger batch fails with "SQ request exceeds capacity"
+  ```
+
+  A post then waits for SQ space (up to `MORI_IO_SQ_BACKOFF_TIMEOUT_US`, default 5 s) instead of failing: this is
+  flow control, the transfer keeps line-rate throughput across QPs.
+- **Or put the KV in its own traffic class** (`MORI_IO_TC` / `MORI_IO_SL`, matching the switch's class map). EP then no
+  longer queues behind it. On a lossy class expect retransmissions and a longer KV tail when several sources write
+  one NIC at once.
+- **Do not just rate-limit.** Pacing that still posts large batches keeps the line-rate trains and spreads them over
+  more time, so they meet EP more often (measured: +15% at 10 GB/s per NIC with 16 MB batches).
 
 ## Profiling MORI-IO with ROCTX Markers
 
