@@ -219,12 +219,14 @@ Recommendations:
   export MORI_IO_ENABLE_CHUNKING=1
   export MORI_IO_CHUNK_BYTES=1048576   # 1-4 MiB per WR
   export MORI_IO_MAX_CHUNKS=4096       # >= the largest transfer / chunk size (the default 64 enlarges the chunks)
-  export MORI_IO_QP_MAX_SEND_WR=4      # SQ depth: bytes in flight per QP ~ depth x chunk
+  export MORI_IO_QP_MAX_SEND_WR=4      # SQ depth: in flight per transfer ~ qp_per_transfer x depth x chunk
   export MORI_IO_POST_BATCH_SIZE=4     # <= the SQ depth; a larger batch fails with "SQ request exceeds capacity"
   ```
 
   A post then waits for SQ space (up to `MORI_IO_SQ_BACKOFF_TIMEOUT_US`, default 5 s) instead of failing: this is
-  flow control, the transfer keeps line-rate throughput across QPs.
+  flow control, the transfer keeps line-rate throughput across QPs. The bound is per transfer, summed over its QPs:
+  with 4 QPs per transfer and depth 4, a transfer still keeps 16 MB in flight and still reaches line rate (measured:
+  no change against depth-unbounded 4-QP reads); lower the depth as the QP count goes up.
 - **Or put the KV in its own traffic class** (`MORI_IO_TC` / `MORI_IO_SL`, matching the switch's class map). EP then no
   longer queues behind it. On a lossy class expect retransmissions and a longer KV tail when several sources write
   one NIC at once; bounding the in-flight bytes as above removes them (no retransmissions with 2 MB batches).
